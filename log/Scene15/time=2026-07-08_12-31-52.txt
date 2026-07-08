@@ -1,0 +1,9 @@
+******** Training begin ********
+=======> Train epoch: 0/1
+margin = 5
+dist: P = 2.39, N = 2.46, TN = 2.46, FN = 2.45; ncl_loss: 3.93, ver_loss:4.41, time = 0.77 s
+Clustering: acc=0.1726, nmi=0.0925, ari=0.0345
+=======> Train epoch: 1/1
+dist: P = 2.65, N = 3.22, TN = 3.25, FN = 2.86; ncl_loss: 2.3, ver_loss:0.65, time = 1.31 s
+Clustering: acc=0.3159, nmi=0.2588, ari=0.1462
+******** End, training time = 2.08 s ********

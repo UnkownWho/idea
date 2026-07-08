@@ -1,0 +1,247 @@
+******** Training begin ********
+=======> Train epoch: 0/80
+margin = 5
+dist: P = 2.36, N = 2.46, TN = 2.46, FN = 2.46; ncl_loss: 4.0, ver_loss:4.43, time = 4.49 s
+Clustering: acc=0.1864, nmi=0.1249, ari=0.0469
+=======> Train epoch: 1/80
+dist: P = 3.35, N = 3.5, TN = 3.51, FN = 3.37; ncl_loss: 1.66, ver_loss:0.53, time = 13.76 s
+Clustering: acc=0.3438, nmi=0.3534, ari=0.19
+=======> Train epoch: 2/80
+dist: P = 3.65, N = 3.93, TN = 3.94, FN = 3.71; ncl_loss: 1.12, ver_loss:0.2, time = 15.06 s
+Clustering: acc=0.3037, nmi=0.3303, ari=0.1608
+=======> Train epoch: 3/80
+dist: P = 3.75, N = 4.16, TN = 4.18, FN = 3.89; ncl_loss: 0.89, ver_loss:0.18, time = 14.84 s
+Clustering: acc=0.297, nmi=0.3173, ari=0.1588
+=======> Train epoch: 4/80
+dist: P = 3.86, N = 4.36, TN = 4.38, FN = 4.06; ncl_loss: 0.72, ver_loss:0.17, time = 14.82 s
+Clustering: acc=0.3072, nmi=0.3267, ari=0.1639
+=======> Train epoch: 5/80
+dist: P = 3.9, N = 4.53, TN = 4.55, FN = 4.18; ncl_loss: 0.58, ver_loss:0.16, time = 14.69 s
+Clustering: acc=0.2769, nmi=0.3136, ari=0.1421
+=======> Train epoch: 6/80
+dist: P = 4.0, N = 4.68, TN = 4.71, FN = 4.31; ncl_loss: 0.5, ver_loss:0.14, time = 14.95 s
+Clustering: acc=0.3032, nmi=0.3058, ari=0.1533
+=======> Train epoch: 7/80
+dist: P = 4.06, N = 4.8, TN = 4.83, FN = 4.41; ncl_loss: 0.45, ver_loss:0.14, time = 14.74 s
+Clustering: acc=0.299, nmi=0.3148, ari=0.1548
+=======> Train epoch: 8/80
+dist: P = 4.11, N = 4.89, TN = 4.92, FN = 4.49; ncl_loss: 0.42, ver_loss:0.13, time = 14.8 s
+Clustering: acc=0.2858, nmi=0.2999, ari=0.1476
+=======> Train epoch: 9/80
+dist: P = 4.14, N = 4.97, TN = 5.0, FN = 4.53; ncl_loss: 0.39, ver_loss:0.12, time = 14.63 s
+Clustering: acc=0.2912, nmi=0.3075, ari=0.1482
+=======> Train epoch: 10/80
+******* neg_dist_mean >= 1.0 * margin, start using fine loss at epoch: 11 *******
+dist: P = 4.14, N = 5.02, TN = 5.05, FN = 4.57; ncl_loss: 0.38, ver_loss:0.12, time = 14.85 s
+Clustering: acc=0.3019, nmi=0.3152, ari=0.1598
+=======> Train epoch: 11/80
+dist: P = 3.96, N = 5.04, TN = 5.08, FN = 4.52; ncl_loss: 0.35, ver_loss:0.11, time = 15.31 s
+Clustering: acc=0.3151, nmi=0.3209, ari=0.1704
+=======> Train epoch: 12/80
+dist: P = 3.76, N = 5.07, TN = 5.11, FN = 4.46; ncl_loss: 0.34, ver_loss:0.11, time = 15.21 s
+Clustering: acc=0.3173, nmi=0.3352, ari=0.173
+=======> Train epoch: 13/80
+dist: P = 3.57, N = 5.1, TN = 5.15, FN = 4.42; ncl_loss: 0.33, ver_loss:0.1, time = 15.09 s
+Clustering: acc=0.3351, nmi=0.3433, ari=0.1814
+=======> Train epoch: 14/80
+dist: P = 3.44, N = 5.14, TN = 5.2, FN = 4.4; ncl_loss: 0.32, ver_loss:0.1, time = 15.04 s
+Clustering: acc=0.3179, nmi=0.3436, ari=0.1799
+=======> Train epoch: 15/80
+dist: P = 3.31, N = 5.18, TN = 5.24, FN = 4.38; ncl_loss: 0.31, ver_loss:0.1, time = 15.16 s
+Clustering: acc=0.3351, nmi=0.3627, ari=0.1857
+=======> Train epoch: 16/80
+dist: P = 3.22, N = 5.21, TN = 5.28, FN = 4.37; ncl_loss: 0.3, ver_loss:0.1, time = 15.01 s
+Clustering: acc=0.3318, nmi=0.3623, ari=0.1895
+=======> Train epoch: 17/80
+dist: P = 3.17, N = 5.25, TN = 5.31, FN = 4.37; ncl_loss: 0.29, ver_loss:0.09, time = 15.02 s
+Clustering: acc=0.3634, nmi=0.3697, ari=0.2008
+=======> Train epoch: 18/80
+dist: P = 3.01, N = 5.29, TN = 5.36, FN = 4.36; ncl_loss: 0.28, ver_loss:0.09, time = 14.98 s
+Clustering: acc=0.3668, nmi=0.3818, ari=0.2081
+=======> Train epoch: 19/80
+dist: P = 2.9, N = 5.34, TN = 5.41, FN = 4.35; ncl_loss: 0.27, ver_loss:0.09, time = 14.93 s
+Clustering: acc=0.3605, nmi=0.3914, ari=0.2066
+=======> Train epoch: 20/80
+dist: P = 2.82, N = 5.38, TN = 5.46, FN = 4.36; ncl_loss: 0.26, ver_loss:0.09, time = 15.01 s
+Clustering: acc=0.3728, nmi=0.3884, ari=0.2112
+=======> Train epoch: 21/80
+dist: P = 2.76, N = 5.43, TN = 5.51, FN = 4.36; ncl_loss: 0.26, ver_loss:0.09, time = 15.0 s
+Clustering: acc=0.3759, nmi=0.3829, ari=0.2059
+=======> Train epoch: 22/80
+dist: P = 2.68, N = 5.48, TN = 5.56, FN = 4.39; ncl_loss: 0.25, ver_loss:0.09, time = 14.99 s
+Clustering: acc=0.394, nmi=0.3832, ari=0.2148
+=======> Train epoch: 23/80
+dist: P = 2.63, N = 5.52, TN = 5.6, FN = 4.4; ncl_loss: 0.24, ver_loss:0.08, time = 15.01 s
+Clustering: acc=0.3775, nmi=0.4006, ari=0.228
+=======> Train epoch: 24/80
+dist: P = 2.5, N = 5.56, TN = 5.65, FN = 4.39; ncl_loss: 0.24, ver_loss:0.08, time = 15.02 s
+Clustering: acc=0.3889, nmi=0.3998, ari=0.235
+=======> Train epoch: 25/80
+dist: P = 2.41, N = 5.61, TN = 5.7, FN = 4.4; ncl_loss: 0.23, ver_loss:0.08, time = 15.02 s
+Clustering: acc=0.3761, nmi=0.4085, ari=0.2323
+=======> Train epoch: 26/80
+dist: P = 2.36, N = 5.66, TN = 5.76, FN = 4.4; ncl_loss: 0.23, ver_loss:0.08, time = 14.94 s
+Clustering: acc=0.3728, nmi=0.4042, ari=0.2289
+=======> Train epoch: 27/80
+dist: P = 2.29, N = 5.72, TN = 5.82, FN = 4.41; ncl_loss: 0.22, ver_loss:0.08, time = 14.95 s
+Clustering: acc=0.3764, nmi=0.405, ari=0.2322
+=======> Train epoch: 28/80
+dist: P = 2.23, N = 5.77, TN = 5.87, FN = 4.44; ncl_loss: 0.21, ver_loss:0.08, time = 14.99 s
+Clustering: acc=0.3786, nmi=0.4081, ari=0.2354
+=======> Train epoch: 29/80
+dist: P = 2.16, N = 5.82, TN = 5.92, FN = 4.47; ncl_loss: 0.21, ver_loss:0.08, time = 15.0 s
+Clustering: acc=0.3918, nmi=0.3911, ari=0.2365
+=======> Train epoch: 30/80
+dist: P = 2.15, N = 5.88, TN = 5.98, FN = 4.51; ncl_loss: 0.2, ver_loss:0.08, time = 15.09 s
+Clustering: acc=0.3902, nmi=0.4029, ari=0.2373
+=======> Train epoch: 31/80
+dist: P = 2.11, N = 5.92, TN = 6.03, FN = 4.53; ncl_loss: 0.2, ver_loss:0.07, time = 14.95 s
+Clustering: acc=0.3797, nmi=0.3872, ari=0.2256
+=======> Train epoch: 32/80
+dist: P = 2.1, N = 5.97, TN = 6.08, FN = 4.58; ncl_loss: 0.19, ver_loss:0.07, time = 15.04 s
+Clustering: acc=0.377, nmi=0.4003, ari=0.2222
+=======> Train epoch: 33/80
+dist: P = 2.07, N = 6.0, TN = 6.11, FN = 4.58; ncl_loss: 0.19, ver_loss:0.07, time = 15.07 s
+Clustering: acc=0.3826, nmi=0.3885, ari=0.2265
+=======> Train epoch: 34/80
+dist: P = 2.1, N = 6.06, TN = 6.17, FN = 4.64; ncl_loss: 0.18, ver_loss:0.07, time = 14.98 s
+Clustering: acc=0.3741, nmi=0.3995, ari=0.2259
+=======> Train epoch: 35/80
+dist: P = 2.02, N = 6.09, TN = 6.2, FN = 4.66; ncl_loss: 0.18, ver_loss:0.07, time = 14.93 s
+Clustering: acc=0.3844, nmi=0.4017, ari=0.2343
+=======> Train epoch: 36/80
+dist: P = 2.02, N = 6.14, TN = 6.25, FN = 4.68; ncl_loss: 0.18, ver_loss:0.07, time = 14.97 s
+Clustering: acc=0.3724, nmi=0.3899, ari=0.2247
+=======> Train epoch: 37/80
+dist: P = 1.99, N = 6.17, TN = 6.28, FN = 4.72; ncl_loss: 0.17, ver_loss:0.07, time = 14.96 s
+Clustering: acc=0.3857, nmi=0.4101, ari=0.2417
+=======> Train epoch: 38/80
+dist: P = 1.99, N = 6.21, TN = 6.32, FN = 4.73; ncl_loss: 0.17, ver_loss:0.07, time = 14.95 s
+Clustering: acc=0.3726, nmi=0.3974, ari=0.2214
+=======> Train epoch: 39/80
+dist: P = 1.96, N = 6.25, TN = 6.36, FN = 4.77; ncl_loss: 0.16, ver_loss:0.07, time = 15.05 s
+Clustering: acc=0.3793, nmi=0.395, ari=0.2309
+=======> Train epoch: 40/80
+dist: P = 1.91, N = 6.29, TN = 6.4, FN = 4.8; ncl_loss: 0.16, ver_loss:0.07, time = 14.93 s
+Clustering: acc=0.3423, nmi=0.3833, ari=0.2107
+=======> Train epoch: 41/80
+dist: P = 1.89, N = 6.33, TN = 6.44, FN = 4.85; ncl_loss: 0.15, ver_loss:0.07, time = 14.94 s
+Clustering: acc=0.3728, nmi=0.3931, ari=0.2151
+=======> Train epoch: 42/80
+dist: P = 1.9, N = 6.37, TN = 6.48, FN = 4.89; ncl_loss: 0.15, ver_loss:0.07, time = 14.97 s
+Clustering: acc=0.3837, nmi=0.3885, ari=0.2127
+=======> Train epoch: 43/80
+dist: P = 1.89, N = 6.41, TN = 6.52, FN = 4.92; ncl_loss: 0.15, ver_loss:0.07, time = 14.97 s
+Clustering: acc=0.3732, nmi=0.3927, ari=0.2137
+=======> Train epoch: 44/80
+dist: P = 1.85, N = 6.45, TN = 6.56, FN = 4.95; ncl_loss: 0.14, ver_loss:0.06, time = 14.95 s
+Clustering: acc=0.4013, nmi=0.3888, ari=0.2194
+=======> Train epoch: 45/80
+dist: P = 1.87, N = 6.48, TN = 6.6, FN = 4.98; ncl_loss: 0.14, ver_loss:0.06, time = 15.01 s
+Clustering: acc=0.3922, nmi=0.3999, ari=0.2238
+=======> Train epoch: 46/80
+dist: P = 1.83, N = 6.52, TN = 6.64, FN = 5.0; ncl_loss: 0.14, ver_loss:0.06, time = 14.97 s
+Clustering: acc=0.3797, nmi=0.3828, ari=0.2044
+=======> Train epoch: 47/80
+dist: P = 1.86, N = 6.56, TN = 6.67, FN = 5.04; ncl_loss: 0.14, ver_loss:0.06, time = 14.96 s
+Clustering: acc=0.3931, nmi=0.3949, ari=0.2183
+=======> Train epoch: 48/80
+dist: P = 1.84, N = 6.6, TN = 6.71, FN = 5.06; ncl_loss: 0.13, ver_loss:0.06, time = 14.95 s
+Clustering: acc=0.412, nmi=0.3962, ari=0.2268
+=======> Train epoch: 49/80
+dist: P = 1.83, N = 6.63, TN = 6.75, FN = 5.12; ncl_loss: 0.13, ver_loss:0.06, time = 14.96 s
+Clustering: acc=0.377, nmi=0.3849, ari=0.2055
+=======> Train epoch: 50/80
+dist: P = 1.82, N = 6.67, TN = 6.79, FN = 5.14; ncl_loss: 0.13, ver_loss:0.06, time = 14.96 s
+Clustering: acc=0.3579, nmi=0.3839, ari=0.2116
+=======> Train epoch: 51/80
+dist: P = 1.84, N = 6.7, TN = 6.82, FN = 5.18; ncl_loss: 0.13, ver_loss:0.06, time = 14.99 s
+Clustering: acc=0.3819, nmi=0.383, ari=0.2082
+=======> Train epoch: 52/80
+dist: P = 1.8, N = 6.74, TN = 6.86, FN = 5.19; ncl_loss: 0.12, ver_loss:0.06, time = 14.96 s
+Clustering: acc=0.3768, nmi=0.3967, ari=0.2172
+=======> Train epoch: 53/80
+dist: P = 1.8, N = 6.77, TN = 6.89, FN = 5.22; ncl_loss: 0.12, ver_loss:0.06, time = 14.98 s
+Clustering: acc=0.3837, nmi=0.3945, ari=0.2117
+=======> Train epoch: 54/80
+dist: P = 1.81, N = 6.8, TN = 6.92, FN = 5.23; ncl_loss: 0.12, ver_loss:0.06, time = 14.95 s
+Clustering: acc=0.3819, nmi=0.3884, ari=0.2097
+=======> Train epoch: 55/80
+dist: P = 1.8, N = 6.83, TN = 6.95, FN = 5.25; ncl_loss: 0.12, ver_loss:0.06, time = 14.96 s
+Clustering: acc=0.3862, nmi=0.3919, ari=0.2134
+=======> Train epoch: 56/80
+dist: P = 1.78, N = 6.87, TN = 6.99, FN = 5.3; ncl_loss: 0.12, ver_loss:0.06, time = 14.98 s
+Clustering: acc=0.3895, nmi=0.3982, ari=0.213
+=======> Train epoch: 57/80
+dist: P = 1.79, N = 6.89, TN = 7.01, FN = 5.32; ncl_loss: 0.12, ver_loss:0.05, time = 14.97 s
+Clustering: acc=0.4136, nmi=0.3993, ari=0.2291
+=======> Train epoch: 58/80
+dist: P = 1.77, N = 6.93, TN = 7.05, FN = 5.34; ncl_loss: 0.11, ver_loss:0.05, time = 14.91 s
+Clustering: acc=0.4011, nmi=0.3997, ari=0.2175
+=======> Train epoch: 59/80
+dist: P = 1.76, N = 6.96, TN = 7.08, FN = 5.38; ncl_loss: 0.11, ver_loss:0.05, time = 15.0 s
+Clustering: acc=0.4089, nmi=0.401, ari=0.2253
+=======> Train epoch: 60/80
+dist: P = 1.74, N = 6.99, TN = 7.11, FN = 5.38; ncl_loss: 0.11, ver_loss:0.05, time = 14.93 s
+Clustering: acc=0.3931, nmi=0.3909, ari=0.2117
+=======> Train epoch: 61/80
+dist: P = 1.77, N = 7.01, TN = 7.13, FN = 5.4; ncl_loss: 0.11, ver_loss:0.05, time = 14.94 s
+Clustering: acc=0.4029, nmi=0.3988, ari=0.2205
+=======> Train epoch: 62/80
+dist: P = 1.75, N = 7.05, TN = 7.17, FN = 5.45; ncl_loss: 0.11, ver_loss:0.05, time = 14.92 s
+Clustering: acc=0.4062, nmi=0.3841, ari=0.2143
+=======> Train epoch: 63/80
+dist: P = 1.75, N = 7.07, TN = 7.19, FN = 5.47; ncl_loss: 0.1, ver_loss:0.05, time = 14.94 s
+Clustering: acc=0.41, nmi=0.3995, ari=0.2262
+=======> Train epoch: 64/80
+dist: P = 1.75, N = 7.09, TN = 7.21, FN = 5.48; ncl_loss: 0.1, ver_loss:0.05, time = 14.92 s
+Clustering: acc=0.4158, nmi=0.3911, ari=0.2209
+=======> Train epoch: 65/80
+dist: P = 1.73, N = 7.13, TN = 7.25, FN = 5.5; ncl_loss: 0.1, ver_loss:0.05, time = 14.97 s
+Clustering: acc=0.4042, nmi=0.3897, ari=0.2208
+=======> Train epoch: 66/80
+dist: P = 1.73, N = 7.15, TN = 7.27, FN = 5.51; ncl_loss: 0.1, ver_loss:0.05, time = 14.91 s
+Clustering: acc=0.3831, nmi=0.3974, ari=0.2176
+=======> Train epoch: 67/80
+dist: P = 1.72, N = 7.19, TN = 7.31, FN = 5.57; ncl_loss: 0.1, ver_loss:0.05, time = 14.93 s
+Clustering: acc=0.3991, nmi=0.3925, ari=0.221
+=======> Train epoch: 68/80
+dist: P = 1.72, N = 7.2, TN = 7.32, FN = 5.58; ncl_loss: 0.1, ver_loss:0.05, time = 14.9 s
+Clustering: acc=0.3929, nmi=0.386, ari=0.2147
+=======> Train epoch: 69/80
+dist: P = 1.71, N = 7.22, TN = 7.35, FN = 5.58; ncl_loss: 0.1, ver_loss:0.05, time = 14.89 s
+Clustering: acc=0.3703, nmi=0.3837, ari=0.2057
+=======> Train epoch: 70/80
+dist: P = 1.69, N = 7.25, TN = 7.38, FN = 5.62; ncl_loss: 0.1, ver_loss:0.05, time = 14.92 s
+Clustering: acc=0.381, nmi=0.3946, ari=0.2119
+=======> Train epoch: 71/80
+dist: P = 1.69, N = 7.27, TN = 7.4, FN = 5.64; ncl_loss: 0.09, ver_loss:0.05, time = 14.99 s
+Clustering: acc=0.3973, nmi=0.394, ari=0.2158
+=======> Train epoch: 72/80
+dist: P = 1.7, N = 7.29, TN = 7.42, FN = 5.65; ncl_loss: 0.09, ver_loss:0.05, time = 15.04 s
+Clustering: acc=0.4071, nmi=0.3976, ari=0.223
+=======> Train epoch: 73/80
+dist: P = 1.69, N = 7.31, TN = 7.44, FN = 5.65; ncl_loss: 0.09, ver_loss:0.04, time = 14.91 s
+Clustering: acc=0.4029, nmi=0.3947, ari=0.2197
+=======> Train epoch: 74/80
+dist: P = 1.67, N = 7.34, TN = 7.47, FN = 5.68; ncl_loss: 0.09, ver_loss:0.04, time = 14.94 s
+Clustering: acc=0.4123, nmi=0.3888, ari=0.2212
+=======> Train epoch: 75/80
+dist: P = 1.67, N = 7.36, TN = 7.49, FN = 5.71; ncl_loss: 0.09, ver_loss:0.05, time = 15.0 s
+Clustering: acc=0.3864, nmi=0.3865, ari=0.2095
+=======> Train epoch: 76/80
+dist: P = 1.67, N = 7.38, TN = 7.51, FN = 5.72; ncl_loss: 0.09, ver_loss:0.04, time = 15.14 s
+Clustering: acc=0.3969, nmi=0.388, ari=0.2116
+=======> Train epoch: 77/80
+dist: P = 1.68, N = 7.41, TN = 7.53, FN = 5.76; ncl_loss: 0.09, ver_loss:0.04, time = 15.25 s
+Clustering: acc=0.4031, nmi=0.3929, ari=0.2201
+=======> Train epoch: 78/80
+dist: P = 1.62, N = 7.43, TN = 7.56, FN = 5.76; ncl_loss: 0.09, ver_loss:0.04, time = 14.92 s
+Clustering: acc=0.3846, nmi=0.3922, ari=0.214
+=======> Train epoch: 79/80
+dist: P = 1.64, N = 7.45, TN = 7.57, FN = 5.78; ncl_loss: 0.08, ver_loss:0.04, time = 14.98 s
+Clustering: acc=0.4036, nmi=0.3884, ari=0.2306
+=======> Train epoch: 80/80
+dist: P = 1.64, N = 7.47, TN = 7.6, FN = 5.81; ncl_loss: 0.09, ver_loss:0.04, time = 14.94 s
+Clustering: acc=0.3851, nmi=0.381, ari=0.2116
+******** End, training time = 1200.86 s ********

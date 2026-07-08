@@ -1,0 +1,4 @@
+******** Training begin ********
+=======> Train epoch: 0/1
+margin = 5
+dist: P = 2.39, N = 2.46, TN = 2.46, FN = 2.44; ncl_loss: 3.92, ver_loss:4.46, time = 1.04 s

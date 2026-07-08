@@ -1,0 +1,30 @@
+# datasets
+datasets/*.mat
+datasets/*.h5
+datasets/*.hdf5
+datasets/*.npy
+datasets/*.npz
+datasets/*.pkl
+datasets/*.zip
+datasets/*.rar
+datasets/*.7z
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# experiment outputs
+logs/
+runs/
+results/
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# editor / system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
