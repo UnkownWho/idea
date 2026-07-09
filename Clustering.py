@@ -2,6 +2,10 @@
 Multi-view clustering and evaluation in MvCLN (CVPR2021)
 '''
 
+import os
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import numpy as np
 import sklearn.metrics as metrics
 from sklearn.cluster import KMeans
@@ -81,15 +85,15 @@ def classification_metric(y_true, y_pred, average='macro', verbose=False, decima
     accuracy = np.round(accuracy, decimals)
 
     # precision
-    precision = metrics.precision_score(y_true, y_pred, average=average)
+    precision = metrics.precision_score(y_true, y_pred, average=average, zero_division=0)
     precision = np.round(precision, decimals)
 
     # recall
-    recall = metrics.recall_score(y_true, y_pred, average=average)
+    recall = metrics.recall_score(y_true, y_pred, average=average, zero_division=0)
     recall = np.round(recall, decimals)
 
     # F-score
-    f_score = metrics.f1_score(y_true, y_pred, average=average)
+    f_score = metrics.f1_score(y_true, y_pred, average=average, zero_division=0)
     f_score = np.round(f_score, decimals)
 
     if verbose:
