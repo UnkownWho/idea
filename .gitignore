@@ -28,3 +28,39 @@ checkpoints/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# datasets / large data files
+*.mat
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.zip
+*.rar
+*.7z
+
+# model checkpoints / generated weights
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# experiment outputs
+logs/
+runs/
+results/
+checkpoints/
+outputs/
+
+# system / editor
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
