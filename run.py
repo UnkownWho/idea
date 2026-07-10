@@ -17,7 +17,7 @@ parser = argparse.ArgumentParser(description='SURE in PyTorch')
 parser.add_argument('--data', default='0', type=int,
                     help='choice of dataset, 0-Scene15, 1-Caltech101, 2-Reuters10, 3-NoisyMNIST,'
                          '4-DeepCaltech, 5-DeepAnimal, 6-MNISTUSPS')
-parser.add_argument('-li', '--log-interval', default='1', type=int, help='interval for logging info')
+parser.add_argument('-li', '--log-interval', default='5', type=int, help='interval for logging info')
 parser.add_argument('-bs', '--batch-size', default='1024', type=int, help='number of batch size')
 parser.add_argument('-e', '--epochs', default='80', type=int, help='number of epochs to run')
 parser.add_argument('-lr', '--learn-rate', default='1e-3', type=float, help='learning rate of adam')
