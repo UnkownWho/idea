@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from Clustering import Clustering, clustering_metric
-from anchor_data.clean_sure_dataset import CleanSUREScene15Dataset, seed_worker
+from anchor_data.clean_sure_dataset import DATASET_NAMES, CleanSUREDataset, seed_worker
 from anchor_models.shared_anchor import SharedAnchorModel
 
 
@@ -42,8 +42,8 @@ def setup_experiment_logging(dataset_name):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Clean shared-anchor experiment for Scene15")
-    parser.add_argument("--data", default="0", type=str, help="Only Scene15/0 is supported in the first version.")
+    parser = argparse.ArgumentParser(description="Clean shared-anchor experiment for SURE-format two-view datasets")
+    parser.add_argument("--data", default="0", type=str, help="SURE dataset number (0-6) or dataset name.")
     parser.add_argument("--data-root", default="./datasets", type=str)
     parser.add_argument("--gpu", default="0", type=str)
     parser.add_argument("--seed", default=0, type=int)
@@ -60,6 +60,7 @@ def parse_args():
     parser.add_argument("--lambda-self", default=1.0, type=float)
     parser.add_argument("--lambda-entropy", default=0.1, type=float)
     parser.add_argument("--lambda-balance", default=1.0, type=float)
+    parser.add_argument("--lambda-pair-q", default=0.0, type=float)
     parser.add_argument("--eval-interval", default=5, type=int)
     parser.add_argument("--oracle-fusion", action="store_true", help="Report row-wise fusion in PVP/Both as oracle only.")
     return parser.parse_args()
@@ -77,11 +78,41 @@ def masked_mean(values, mask, eps=1e-8):
     return (values * mask).sum() / mask.sum().clamp_min(eps)
 
 
-def compute_losses(batch, outputs, args):
+def pair_valid_mask(mask, batch_size):
+    if mask.ndim != 2:
+        raise ValueError(f"pair-q expects a 2D mask, got shape {tuple(mask.shape)}")
+    if mask.shape[0] == batch_size and mask.shape[1] >= 2:
+        return torch.logical_and(mask[:, 0] > 0, mask[:, 1] > 0)
+    if mask.shape[1] == batch_size and mask.shape[0] >= 2:
+        return torch.logical_and(mask[0] > 0, mask[1] > 0)
+    raise ValueError(f"pair-q cannot infer mask layout from shape {tuple(mask.shape)} and batch_size={batch_size}")
+
+
+def symmetric_kl(q0, q1):
+    q0 = q0.clamp_min(1e-8)
+    q1 = q1.clamp_min(1e-8)
+    kl_01 = (q0 * (torch.log(q0) - torch.log(q1))).sum(dim=1)
+    kl_10 = (q1 * (torch.log(q1) - torch.log(q0))).sum(dim=1)
+    return 0.5 * (kl_01 + kl_10)
+
+
+def run_pair_q_sanity_check(device):
+    p = torch.tensor([[0.70, 0.20, 0.10], [0.10, 0.30, 0.60]], device=device)
+    q = torch.tensor([[0.20, 0.70, 0.10], [0.60, 0.30, 0.10]], device=device)
+    skl_pq = symmetric_kl(p, q).mean().item()
+    skl_pp = symmetric_kl(p, p).mean().item()
+    print(f"Pair-q sanity: SKL(p,q)={skl_pq:.8f}, SKL(p,p)={skl_pp:.8f}")
+
+
+def compute_losses(batch, outputs, args, use_pair_q=False):
     mask = batch["mask"].to(outputs["z"][0].device)
     rec_loss = torch.zeros((), device=mask.device)
     self_loss = torch.zeros((), device=mask.device)
     entropy_loss = torch.zeros((), device=mask.device)
+    pair_q_loss = torch.zeros((), device=mask.device)
+    pair_q_valid_count = 0
+    q01_mean_abs_diff = 0.0
+    q01_max_abs_diff = 0.0
     q_values = []
 
     for view_idx, x in enumerate(batch["views"]):
@@ -102,30 +133,59 @@ def compute_losses(batch, outputs, args):
     num_clusters = mean_q.numel()
     balance_loss = (mean_q * torch.log(mean_q.clamp_min(1e-8) * num_clusters)).sum()
 
+    if args.lambda_pair_q > 0 and use_pair_q:
+        q0_all = outputs["q"][0]
+        q1_all = outputs["q"][1]
+        if q0_all.ndim != 2 or q1_all.ndim != 2:
+            raise ValueError(f"pair-q expects q0/q1 to be 2D, got {tuple(q0_all.shape)} and {tuple(q1_all.shape)}")
+        if q0_all.shape != q1_all.shape:
+            raise ValueError(f"pair-q expects q0/q1 same shape, got {tuple(q0_all.shape)} and {tuple(q1_all.shape)}")
+
+        paired_visible = pair_valid_mask(mask, q0_all.shape[0])
+        if paired_visible.any():
+            q0 = q0_all[paired_visible]
+            q1 = q1_all[paired_visible]
+            pair_q_values = symmetric_kl(q0, q1)
+            pair_q_loss = pair_q_values.mean()
+            pair_q_valid_count = int(paired_visible.sum().item())
+            q_abs_diff = torch.abs(q0 - q1)
+            q01_mean_abs_diff = q_abs_diff.mean().item()
+            q01_max_abs_diff = q_abs_diff.max().item()
+
     total = (
         args.lambda_rec * rec_loss
         + args.lambda_self * self_loss
         + args.lambda_entropy * entropy_loss
         + args.lambda_balance * balance_loss
+        + args.lambda_pair_q * pair_q_loss
     )
     return total, {
         "rec": rec_loss.item(),
         "self": self_loss.item(),
         "entropy": entropy_loss.item(),
         "balance": balance_loss.item(),
+        "pair_q": pair_q_loss.item(),
+        "pair_q_raw": pair_q_loss.item(),
+        "pair_q_valid_count": pair_q_valid_count,
+        "q01_mean_abs_diff": q01_mean_abs_diff,
+        "q01_max_abs_diff": q01_max_abs_diff,
         "total": total.item(),
     }
 
 
-def train_one_epoch(model, loader, optimizer, device, args):
+def train_one_epoch(model, loader, optimizer, device, args, use_pair_q=False):
     model.train()
-    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "total": 0.0}
+    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "total": 0.0}
+    pair_q_weighted_sum = 0.0
+    q01_diff_weighted_sum = 0.0
+    pair_q_valid_count = 0
+    q01_max_abs_diff = 0.0
     n_batches = 0
     for batch in loader:
         views = [x.to(device) for x in batch["views"]]
         mask = batch["mask"].to(device)
         outputs = model(views, mask)
-        loss, loss_dict = compute_losses(batch, outputs, args)
+        loss, loss_dict = compute_losses(batch, outputs, args, use_pair_q=use_pair_q)
 
         optimizer.zero_grad()
         loss.backward()
@@ -133,9 +193,19 @@ def train_one_epoch(model, loader, optimizer, device, args):
 
         for key in loss_sum:
             loss_sum[key] += loss_dict[key]
+        valid_count = loss_dict["pair_q_valid_count"]
+        pair_q_valid_count += valid_count
+        pair_q_weighted_sum += loss_dict["pair_q_raw"] * valid_count
+        q01_diff_weighted_sum += loss_dict["q01_mean_abs_diff"] * valid_count
+        q01_max_abs_diff = max(q01_max_abs_diff, loss_dict["q01_max_abs_diff"])
         n_batches += 1
 
-    return {key: value / max(n_batches, 1) for key, value in loss_sum.items()}
+    averaged = {key: value / max(n_batches, 1) for key, value in loss_sum.items()}
+    averaged["pair_q_raw"] = pair_q_weighted_sum / pair_q_valid_count if pair_q_valid_count > 0 else 0.0
+    averaged["pair_q_valid_count"] = pair_q_valid_count
+    averaged["q01_mean_abs_diff"] = q01_diff_weighted_sum / pair_q_valid_count if pair_q_valid_count > 0 else 0.0
+    averaged["q01_max_abs_diff"] = q01_max_abs_diff
+    return averaged
 
 
 def _kmeans_scores(features, labels):
@@ -303,20 +373,33 @@ def evaluate(model, loader, dataset, device, oracle_fusion=False):
 
 def main():
     args = parse_args()
-    if args.data not in ("0", "Scene15"):
-        raise ValueError("First clean anchor version only supports Scene15: use --data 0 or --data Scene15.")
+    try:
+        dataset_id = int(args.data)
+    except ValueError:
+        dataset_id = None
+    if dataset_id is not None:
+        if dataset_id not in DATASET_NAMES:
+            raise ValueError(f"Unsupported --data {args.data}; expected a number from 0 to 6 or a SURE dataset name.")
+        dataset_name = DATASET_NAMES[dataset_id]
+    else:
+        dataset_name = args.data
+        if dataset_name not in DATASET_NAMES.values():
+            raise ValueError(
+                f"Unsupported --data {args.data}; expected a number from 0 to 6 or a SURE dataset name."
+            )
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)
 
-    dataset = CleanSUREScene15Dataset(
+    dataset = CleanSUREDataset(
+        dataset_name=dataset_name,
         data_root=args.data_root,
         aligned_prop=args.aligned_prop,
         complete_prop=args.complete_prop,
         seed=args.seed,
     )
-    log_path = setup_experiment_logging("Scene15")
+    log_path = setup_experiment_logging(dataset_name)
     generator = torch.Generator()
     generator.manual_seed(args.seed)
     train_loader = DataLoader(
@@ -342,17 +425,24 @@ def main():
     print(f"Args: {args}")
     print(f"Log file: {log_path}")
     print(f"Device: {device}")
-    print(f"Scene15 samples={len(dataset)}, view_dims={dataset.view_dims}, clusters={dataset.num_clusters}")
+    print(f"Dataset={dataset_name}")
+    print(f"Samples={len(dataset)}, view_dims={dataset.view_dims}, clusters={dataset.num_clusters}")
     print(f"PVP={dataset.is_pvp}, PSP={dataset.is_psp}")
+    if args.lambda_pair_q > 0:
+        run_pair_q_sanity_check(device)
     print("==========")
 
     start_time = time.time()
     for epoch in range(1, args.epochs + 1):
-        loss_dict = train_one_epoch(model, train_loader, optimizer, device, args)
+        loss_dict = train_one_epoch(model, train_loader, optimizer, device, args, use_pair_q=not dataset.is_pvp)
         print(
             f"Epoch {epoch:03d}: total={loss_dict['total']:.4f}, rec={loss_dict['rec']:.4f}, "
             f"self={loss_dict['self']:.4f}, entropy={loss_dict['entropy']:.4f}, "
-            f"balance={loss_dict['balance']:.4f}"
+            f"balance={loss_dict['balance']:.4f}, pair_q={loss_dict['pair_q']:.4f}, "
+            f"pair_q_raw={loss_dict['pair_q_raw']:.8f}, "
+            f"pair_q_valid_count={loss_dict['pair_q_valid_count']}, "
+            f"q01_mean_abs_diff={loss_dict['q01_mean_abs_diff']:.8f}, "
+            f"q01_max_abs_diff={loss_dict['q01_max_abs_diff']:.8f}"
         )
 
         if epoch % args.eval_interval == 0 or epoch == args.epochs:
