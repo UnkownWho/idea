@@ -19,6 +19,8 @@ from anchor_models.pbgraph import (
     apply_label_mapping,
     graph_from_assignments,
     graph_pair_loss,
+    pair_aware_fusion_features,
+    pseudo_labels_from_features,
     pseudo_labels_from_z,
     q_from_graph,
 )
@@ -54,6 +56,7 @@ def parse_args():
     parser.add_argument("--data", default="0", type=str, help="SURE dataset number (0-6) or dataset name.")
     parser.add_argument("--data-root", default="./datasets", type=str)
     parser.add_argument("--gpu", default="0", type=str)
+    parser.add_argument("--cpu", action="store_true", help="Explicitly allow CPU training; GPU is required by default.")
     parser.add_argument("--seed", default=0, type=int)
     parser.add_argument("--epochs", default=20, type=int)
     parser.add_argument("--batch-size", default=512, type=int)
@@ -78,6 +81,9 @@ def parse_args():
     parser.add_argument("--lambda-graph-pair", default=0.0, type=float)
     parser.add_argument("--pbgraph-pseudo-source", default="fusion_z", choices=("fusion_z", "view_z"), type=str)
     parser.add_argument("--eval-interval", default=5, type=int)
+    parser.add_argument("--eval-q-align", action="store_true", help="Enable evaluation-only q-based matching/imputation.")
+    parser.add_argument("--q-align-topk", default=5, type=int)
+    parser.add_argument("--q-align-metric", default="cosine", choices=("cosine", "kl", "l2"), type=str)
     parser.add_argument("--oracle-fusion", action="store_true", help="Report row-wise fusion in PVP/Both as oracle only.")
     return parser.parse_args()
 
@@ -139,9 +145,14 @@ def compute_losses(batch, outputs, args, pbgraph_state=None):
     ):
         global_ids = batch["global_id"].to(mask.device)
         pseudo_onehot = pbgraph_state["pseudo_onehot"].to(mask.device)[global_ids]
+        pseudo_valid = pbgraph_state.get("pseudo_valid_mask")
+        if pseudo_valid is not None:
+            pseudo_valid = pseudo_valid.to(mask.device)[global_ids]
+        else:
+            pseudo_valid = torch.ones(len(global_ids), dtype=torch.bool, device=mask.device)
         pseudo_terms = []
         for view_idx, q in enumerate(outputs["q"]):
-            visible = mask[:, view_idx] > 0
+            visible = (mask[:, view_idx] > 0) & pseudo_valid
             if visible.any():
                 pseudo_terms.append(-(pseudo_onehot[visible] * q[visible].clamp_min(1e-8).log()).sum(1).mean())
         if pseudo_terms:
@@ -177,8 +188,8 @@ def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
     loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "pseudo_q": 0.0, "graph_pair": 0.0, "total": 0.0}
     n_batches = 0
     for batch in loader:
-        views = [x.to(device) for x in batch["views"]]
-        mask = batch["mask"].to(device)
+        views = [x.to(device, non_blocking=True) for x in batch["views"]]
+        mask = batch["mask"].to(device, non_blocking=True)
         outputs = model(views, mask)
         if args.cluster_head == "pbgraph" and pbgraph_state and pbgraph_state.get("B_list") is not None:
             outputs["q"] = [q_from_graph(outputs["S"][v], pbgraph_state["B_list"][v].to(device)) for v in range(2)]
@@ -218,8 +229,8 @@ def collect_outputs(model, loader, dataset, device, B_list=None):
     model.eval()
     with torch.no_grad():
         for batch in loader:
-            views = [x.to(device) for x in batch["views"]]
-            outputs = model(views, batch["mask"].to(device))
+            views = [x.to(device, non_blocking=True) for x in batch["views"]]
+            outputs = model(views, batch["mask"].to(device, non_blocking=True))
             if B_list is not None:
                 q_list = [q_from_graph(outputs["S"][v], B_list[v]) for v in range(2)]
             else:
@@ -255,13 +266,52 @@ def collect_outputs(model, loader, dataset, device, B_list=None):
 
 def update_pbgraph(model, loader, dataset, device, args, state):
     collected = collect_outputs(model, loader, dataset, device)
-    pseudo = pseudo_labels_from_z(
-        [collected["z_by_view"][0], collected["z_by_view"][1]],
-        dataset.mask_matrix,
-        dataset.num_clusters,
-        args.pbgraph_pseudo_source,
-        args.seed,
-    )
+    pair_aware = bool(dataset.is_pvp and args.pbgraph_pseudo_source == "fusion_z")
+    if pair_aware:
+        fusion_features, fusion_valid, fusion_stats = pair_aware_fusion_features(
+            [collected["z_by_view"][0], collected["z_by_view"][1]],
+            dataset.view_sample_ids,
+            dataset.mask_matrix,
+            dataset.paired_indices,
+        )
+        pseudo = pseudo_labels_from_features(
+            fusion_features,
+            fusion_valid,
+            dataset.num_clusters,
+            args.seed,
+        )
+    elif dataset.is_pvp and args.pbgraph_pseudo_source == "view_z":
+        pseudo = []
+        single_view_count = 0
+        invalid_count = 0
+        for view_idx in range(2):
+            valid = dataset.mask_matrix[:, view_idx] > 0
+            features = np.zeros_like(collected["z_by_view"][view_idx])
+            source_ids = dataset.view_sample_ids[:, view_idx]
+            features[valid] = collected["z_by_view"][view_idx][source_ids[valid]]
+            pseudo.append(pseudo_labels_from_features(features, valid, dataset.num_clusters, args.seed))
+            single_view_count += int(valid.sum())
+            invalid_count += int((~valid).sum())
+        fusion_stats = {
+            "num_aligned": 0,
+            "num_single_view": single_view_count,
+            "num_invalid": invalid_count,
+        }
+    else:
+        pseudo = pseudo_labels_from_z(
+            [collected["z_by_view"][0], collected["z_by_view"][1]],
+            dataset.mask_matrix,
+            dataset.num_clusters,
+            args.pbgraph_pseudo_source,
+            args.seed,
+        )
+        both_visible = dataset.mask_matrix[:, 0] > 0
+        both_visible &= dataset.mask_matrix[:, 1] > 0
+        fusion_stats = {
+            "num_aligned": int(both_visible.sum()),
+            "num_single_view": int((~both_visible & dataset.mask_matrix.any(axis=1)).sum()),
+            "num_invalid": int((~dataset.mask_matrix.any(axis=1)).sum()),
+        }
     if isinstance(pseudo, list):
         raw_pseudo_list = pseudo
         raw_pseudo_for_onehot = pseudo[0].copy()
@@ -295,9 +345,16 @@ def update_pbgraph(model, loader, dataset, device, args, state):
     pseudo_for_onehot = np.maximum(pseudo_for_onehot, 0)
     onehot = F.one_hot(torch.from_numpy(pseudo_for_onehot).long(), dataset.num_clusters).float()
 
+    if dataset.is_pvp:
+        pseudo_valid_mask = np.zeros(len(dataset), dtype=bool)
+        pseudo_valid_mask[dataset.paired_indices] = True
+        pseudo_valid_mask &= dataset.mask_matrix.any(axis=1)
+    else:
+        pseudo_valid_mask = dataset.mask_matrix.any(axis=1)
+
     new_graphs = []
     for view_idx in range(2):
-        valid = dataset.mask_matrix[:, view_idx] > 0
+        valid = (dataset.mask_matrix[:, view_idx] > 0) & pseudo_valid_mask
         labels_for_view = torch.from_numpy(pseudo_list[view_idx]).long()
         assignments = torch.from_numpy(collected["s_by_view"][view_idx]).float()
         new_graphs.append(
@@ -320,6 +377,7 @@ def update_pbgraph(model, loader, dataset, device, args, state):
     state["prev_pseudo_labels"] = pseudo_for_onehot.copy()
     state["pseudo_labels"] = torch.from_numpy(pseudo_for_onehot).long()
     state["pseudo_onehot"] = onehot
+    state["pseudo_valid_mask"] = torch.from_numpy(pseudo_valid_mask)
     state["active"] = True
     counts = np.bincount(pseudo_for_onehot, minlength=dataset.num_clusters)
     ratios = counts / max(len(pseudo_for_onehot), 1)
@@ -336,6 +394,12 @@ def update_pbgraph(model, loader, dataset, device, args, state):
         f"label_agreement_after={alignment_diag['agreement_after']:.6f}, "
         f"contingency_trace_before={alignment_diag['trace_before']}, "
         f"contingency_trace_after={alignment_diag['trace_after']}"
+    )
+    print(
+        f"PBGraph pbgraph_pair_aware_fusion={pair_aware}, "
+        f"pseudo_label_num_aligned_samples={fusion_stats['num_aligned']}, "
+        f"pseudo_label_num_single_view_samples={fusion_stats['num_single_view']}, "
+        f"pseudo_label_num_invalid_fusion_skipped={fusion_stats['num_invalid']}"
     )
     for view_idx, graph in enumerate(state["B_list"]):
         col_sums = graph.sum(0).numpy()
@@ -440,7 +504,135 @@ def _format_s_diagnostics(name, diag):
     ]
 
 
-def evaluate(model, loader, dataset, device, oracle_fusion=False, B_list=None):
+def _q_similarity(query, candidates, metric):
+    query = np.asarray(query, dtype=np.float32)
+    candidates = np.asarray(candidates, dtype=np.float32)
+    if metric == "cosine":
+        query = query / max(float(np.linalg.norm(query)), 1e-8)
+        candidates = candidates / np.maximum(np.linalg.norm(candidates, axis=1, keepdims=True), 1e-8)
+        return candidates @ query
+    if metric == "l2":
+        return -np.sum((candidates - query[None, :]) ** 2, axis=1)
+    q0 = np.clip(query, 1e-8, 1.0)
+    q1 = np.clip(candidates, 1e-8, 1.0)
+    kl01 = np.sum(q0[None, :] * (np.log(q0[None, :]) - np.log(q1)), axis=1)
+    kl10 = np.sum(q1 * (np.log(q1) - np.log(q0[None, :])), axis=1)
+    return -0.5 * (kl01 + kl10)
+
+
+def _q_align_match(query, candidate_ids, q_by_view, target_view, topk, metric):
+    similarities = _q_similarity(query, q_by_view[target_view][candidate_ids], metric)
+    order = np.argsort(similarities)[::-1]
+    selected = order[: min(max(int(topk), 1), len(order))]
+    return candidate_ids[selected], similarities[selected]
+
+
+def _q_align_evaluate(dataset, z_by_view, q_by_view, seen_by_view, labels, topk, metric):
+    """Evaluation-only q matching and missing-view imputation."""
+    n_samples = len(dataset)
+    latent_dim = z_by_view[0].shape[1]
+    num_clusters = q_by_view[0].shape[1]
+    mask = dataset.mask_matrix > 0
+    candidate_ids = [np.flatnonzero(seen_by_view[v]) for v in range(2)]
+    aligned = np.zeros(n_samples, dtype=bool)
+    aligned[np.asarray(dataset.paired_indices, dtype=np.int64)] = True
+
+    fusion_z = np.zeros((n_samples, latent_dim), dtype=np.float32)
+    fusion_q = np.zeros((n_samples, num_clusters), dtype=np.float32)
+    valid_rows = np.zeros(n_samples, dtype=bool)
+    query_similarities = []
+    matched_ids = []
+    true_matches = []
+    num_queries = 0
+    num_invalid = 0
+
+    for row in range(n_samples):
+        visible = np.flatnonzero(mask[row])
+        if len(visible) == 0:
+            num_invalid += 1
+            continue
+
+        # In aligned PSP-only data, retain the original pair when both views exist.
+        if not dataset.is_pvp and len(visible) == 2:
+            fusion_z[row] = 0.5 * (z_by_view[0][row] + z_by_view[1][row])
+            fusion_q[row] = 0.5 * (q_by_view[0][row] + q_by_view[1][row])
+            valid_rows[row] = True
+            continue
+
+        query_view = int(visible[0])
+        target_view = 1 - query_view
+        query_source = int(dataset.view_sample_ids[row, query_view])
+        targets = candidate_ids[target_view]
+        if len(targets) == 0:
+            num_invalid += 1
+            continue
+        matched, similarities = _q_align_match(
+            q_by_view[query_view][query_source],
+            targets,
+            q_by_view,
+            target_view,
+            topk,
+            metric,
+        )
+        matched_z = z_by_view[target_view][matched].mean(axis=0)
+        matched_q = q_by_view[target_view][matched].mean(axis=0)
+        query_z = z_by_view[query_view][query_source]
+        query_q = q_by_view[query_view][query_source]
+        fusion_z[row] = 0.5 * (query_z + matched_z)
+        fusion_q[row] = 0.5 * (query_q + matched_q)
+        valid_rows[row] = True
+        num_queries += 1
+        query_similarities.append(similarities)
+        matched_ids.append(int(matched[0]))
+        true_matches.append(int(matched[0]) == int(dataset.view_sample_ids[row, target_view]))
+
+    if query_similarities:
+        mean_top1 = float(np.mean([scores[0] for scores in query_similarities]))
+        mean_topk = float(np.mean([scores.mean() for scores in query_similarities]))
+        unique_ratio = float(len(set(matched_ids)) / len(matched_ids))
+        true_match_rate = float(np.mean(true_matches))
+    else:
+        mean_top1 = mean_topk = unique_ratio = true_match_rate = 0.0
+
+    diagnostics = {
+        "enabled": True,
+        "metric": metric,
+        "topk": int(topk),
+        "num_queries": num_queries,
+        "mean_top1_sim": mean_top1,
+        "mean_topk_sim": mean_topk,
+        "matched_unique_ratio": unique_ratio,
+        "true_match_rate": true_match_rate,
+        "num_invalid_fusion_skipped": num_invalid,
+    }
+    return fusion_z, fusion_q, valid_rows, diagnostics
+
+
+def _format_q_align_diagnostics(diag):
+    return [
+        f"q_align_enabled={diag['enabled']}",
+        f"q_align_metric={diag['metric']}",
+        f"q_align_topk={diag['topk']}",
+        f"q_align_num_queries={diag['num_queries']}",
+        f"q_align_mean_top1_sim={diag['mean_top1_sim']:.6f}",
+        f"q_align_mean_topk_sim={diag['mean_topk_sim']:.6f}",
+        f"q_align_matched_unique_ratio={diag['matched_unique_ratio']:.6f}",
+        f"q_align_true_match_rate={diag['true_match_rate']:.6f}",
+        f"q_align_num_invalid_fusion_skipped={diag['num_invalid_fusion_skipped']}",
+    ]
+
+
+def evaluate(
+    model,
+    loader,
+    dataset,
+    device,
+    oracle_fusion=False,
+    B_list=None,
+    eval_q_align=False,
+    q_align_topk=5,
+    q_align_metric="cosine",
+):
     model.eval()
     n_samples = len(dataset)
     latent_dim = model.latent_dim
@@ -458,8 +650,8 @@ def evaluate(model, loader, dataset, device, oracle_fusion=False, B_list=None):
 
     with torch.no_grad():
         for batch in loader:
-            views = [x.to(device) for x in batch["views"]]
-            mask = batch["mask"].to(device)
+            views = [x.to(device, non_blocking=True) for x in batch["views"]]
+            mask = batch["mask"].to(device, non_blocking=True)
             outputs = model(views, mask)
             if B_list is not None:
                 outputs["q"] = [q_from_graph(outputs["S"][v], B_list[v].to(device)) for v in range(2)]
@@ -510,6 +702,45 @@ def evaluate(model, loader, dataset, device, oracle_fusion=False, B_list=None):
         diagnostics[f"{prefix}_q"] = _q_diagnostics(q_fused)
         diagnostics[f"{prefix}_S"] = _s_diagnostics(s_fused)
 
+    q_align_diag = {
+        "enabled": bool(eval_q_align),
+        "metric": q_align_metric,
+        "topk": int(q_align_topk),
+        "num_queries": 0,
+        "mean_top1_sim": 0.0,
+        "mean_topk_sim": 0.0,
+        "matched_unique_ratio": 0.0,
+        "true_match_rate": 0.0,
+        "num_invalid_fusion_skipped": 0,
+    }
+    if eval_q_align:
+        aligned_z, aligned_q, aligned_seen, q_align_diag = _q_align_evaluate(
+            dataset,
+            z_by_view,
+            q_by_view,
+            seen_by_view,
+            labels,
+            q_align_topk,
+            q_align_metric,
+        )
+        if aligned_seen.any():
+            if dataset.is_pvp:
+                results["qalign_fusion_z_kmeans"] = _kmeans_scores(aligned_z[aligned_seen], labels[aligned_seen])
+                results["qalign_fusion_q_argmax"] = _q_scores(
+                    aligned_q[aligned_seen], labels[aligned_seen], num_clusters
+                )
+            if dataset.is_psp:
+                results["qalign_imputed_z_kmeans"] = _kmeans_scores(aligned_z[aligned_seen], labels[aligned_seen])
+                results["qalign_imputed_q_argmax"] = _q_scores(
+                    aligned_q[aligned_seen], labels[aligned_seen], num_clusters
+                )
+            if not dataset.is_pvp and not dataset.is_psp:
+                results["qalign_fusion_z_kmeans"] = _kmeans_scores(aligned_z[aligned_seen], labels[aligned_seen])
+                results["qalign_fusion_q_argmax"] = _q_scores(
+                    aligned_q[aligned_seen], labels[aligned_seen], num_clusters
+                )
+    diagnostics["q_align"] = q_align_diag
+
     return results, diagnostics
 
 
@@ -529,7 +760,16 @@ def main():
             raise ValueError("--data must be a SURE dataset number from 0 to 6 or a dataset name.")
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.cpu:
+        device = torch.device("cpu")
+    else:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "GPU training was requested, but CUDA is unavailable. "
+                "Check the NVIDIA driver and install a CUDA-enabled PyTorch build, "
+                "or pass --cpu explicitly."
+            )
+        device = torch.device("cuda:0")
     set_seed(args.seed)
 
     dataset = CleanSUREDataset(
@@ -548,8 +788,9 @@ def main():
         shuffle=True,
         worker_init_fn=seed_worker,
         generator=generator,
+        pin_memory=(device.type == "cuda"),
     )
-    eval_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+    eval_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, pin_memory=(device.type == "cuda"))
 
     model = SharedAnchorModel(
         view_dims=dataset.view_dims,
@@ -565,6 +806,10 @@ def main():
     print(f"Args: {args}")
     print(f"Log file: {log_path}")
     print(f"Device: {device}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if device.type == "cuda":
+        print(f"CUDA device: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / (1024 ** 3):.2f} GB")
     print(f"Dataset={dataset_name}, samples={len(dataset)}, view_dims={dataset.view_dims}, clusters={dataset.num_clusters}")
     print(f"PVP={dataset.is_pvp}, PSP={dataset.is_psp}")
     if args.cluster_head == "pbgraph" and args.num_anchors < dataset.num_clusters:
@@ -574,6 +819,7 @@ def main():
         "pseudo_labels": None,
         "prev_pseudo_labels": None,
         "pseudo_onehot": None,
+        "pseudo_valid_mask": None,
         "B_list": None,
     }
     print("==========")
@@ -600,11 +846,17 @@ def main():
                 model, eval_loader, dataset, device,
                 oracle_fusion=args.oracle_fusion,
                 B_list=pbgraph_state["B_list"] if pbgraph_state["active"] else None,
+                eval_q_align=args.eval_q_align,
+                q_align_topk=args.q_align_topk,
+                q_align_metric=args.q_align_metric,
             )
             for name, scores in results.items():
                 print(_format_scores(name, scores))
             for name, diag in diagnostics.items():
-                if name.endswith("_q"):
+                if name == "q_align":
+                    for line in _format_q_align_diagnostics(diag):
+                        print(line)
+                elif name.endswith("_q"):
                     for line in _format_q_diagnostics(name, diag):
                         print(line)
                 elif name.endswith("_S"):

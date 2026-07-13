@@ -114,6 +114,51 @@ def pseudo_labels_from_z(z_by_view, mask, num_clusters, source="fusion_z", seed=
     return KMeans(n_clusters=num_clusters, n_init=10, random_state=seed).fit_predict(z_fusion)
 
 
+def pseudo_labels_from_features(features, valid, num_clusters, seed=0):
+    labels = np.full(len(features), -1, dtype=np.int64)
+    valid = np.asarray(valid, dtype=bool)
+    if valid.any():
+        labels[valid] = KMeans(
+            n_clusters=num_clusters,
+            n_init=10,
+            random_state=seed,
+        ).fit_predict(features[valid])
+    return labels
+
+
+def pair_aware_fusion_features(z_by_view, view_sample_ids, mask, paired_indices):
+    """Fuse only known pairs; use one visible source for unpaired rows."""
+    n_samples = len(mask)
+    latent_dim = z_by_view[0].shape[1]
+    paired = np.zeros(n_samples, dtype=bool)
+    paired[np.asarray(paired_indices, dtype=np.int64)] = True
+    features = np.zeros((n_samples, latent_dim), dtype=np.float32)
+    valid = np.zeros(n_samples, dtype=bool)
+    aligned_count = 0
+    single_view_count = 0
+
+    for row in range(n_samples):
+        visible_views = np.flatnonzero(mask[row] > 0)
+        if len(visible_views) == 0:
+            continue
+        if paired[row] and len(visible_views) >= 2:
+            # Known aligned rows use the same global source id in both views.
+            features[row] = 0.5 * (z_by_view[0][row] + z_by_view[1][row])
+            aligned_count += 1
+        else:
+            view_idx = int(visible_views[0])
+            source_id = int(view_sample_ids[row, view_idx])
+            features[row] = z_by_view[view_idx][source_id]
+            single_view_count += 1
+        valid[row] = True
+
+    return features, valid, {
+        "num_aligned": aligned_count,
+        "num_single_view": single_view_count,
+        "num_invalid": int((~valid).sum()),
+    }
+
+
 def q_from_graph(assignments, graph):
     q = assignments.matmul(graph).clamp_min(1e-8)
     return q / q.sum(dim=1, keepdim=True).clamp_min(1e-8)
