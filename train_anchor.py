@@ -51,6 +51,17 @@ def setup_experiment_logging(dataset_name):
     return log_path
 
 
+def parse_bool(value):
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in ("true", "1", "yes", "y", "on"):
+        return True
+    if normalized in ("false", "0", "no", "n", "off"):
+        return False
+    raise ValueError(f"Invalid boolean value: {value}. Use True or False.")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Clean shared-anchor experiment for SURE-format two-view datasets")
     parser.add_argument("--data", default="0", type=str, help="SURE dataset number (0-6) or dataset name.")
@@ -81,7 +92,14 @@ def parse_args():
     parser.add_argument("--lambda-graph-pair", default=0.0, type=float)
     parser.add_argument("--pbgraph-pseudo-source", default="fusion_z", choices=("fusion_z", "view_z"), type=str)
     parser.add_argument("--eval-interval", default=5, type=int)
-    parser.add_argument("--eval-q-align", action="store_true", help="Enable evaluation-only q-based matching/imputation.")
+    parser.add_argument(
+        "--eval-q-align",
+        nargs="?",
+        const=True,
+        default=False,
+        type=parse_bool,
+        help="Evaluation-only q matching/imputation. Supports True/False or flag-only enable.",
+    )
     parser.add_argument("--q-align-topk", default=5, type=int)
     parser.add_argument("--q-align-metric", default="cosine", choices=("cosine", "kl", "l2"), type=str)
     parser.add_argument("--oracle-fusion", action="store_true", help="Report row-wise fusion in PVP/Both as oracle only.")
