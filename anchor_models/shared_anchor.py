@@ -29,6 +29,7 @@ class SharedAnchorModel(nn.Module):
         hidden_dim=512,
         num_anchors=64,
         temperature=0.5,
+        anchor_mode="shared",
         dropout=0.0,
     ):
         super().__init__()
@@ -38,6 +39,9 @@ class SharedAnchorModel(nn.Module):
         self.latent_dim = int(latent_dim)
         self.num_anchors = int(num_anchors)
         self.temperature = float(temperature)
+        self.anchor_mode = str(anchor_mode)
+        if self.anchor_mode not in ("shared", "view_specific"):
+            raise ValueError("anchor_mode must be 'shared' or 'view_specific'")
 
         self.encoders = nn.ModuleList([
             _make_mlp(view_dim, hidden_dim, latent_dim, dropout=dropout) for view_dim in self.view_dims
@@ -46,8 +50,21 @@ class SharedAnchorModel(nn.Module):
             _make_mlp(latent_dim, hidden_dim, view_dim, dropout=dropout) for view_dim in self.view_dims
         ])
 
-        self.anchors = nn.Parameter(torch.randn(self.num_anchors, self.latent_dim) * 0.02)
+        if self.anchor_mode == "shared":
+            self.anchors = nn.Parameter(torch.randn(self.num_anchors, self.latent_dim) * 0.02)
+            self.view_anchors = None
+        else:
+            self.anchors = None
+            self.view_anchors = nn.ParameterList([
+                nn.Parameter(torch.randn(self.num_anchors, self.latent_dim) * 0.02)
+                for _ in range(self.num_views)
+            ])
         self.cluster_matrix = nn.Parameter(torch.randn(self.num_clusters, self.num_anchors) * 0.02)
+
+    def get_anchor_list(self):
+        if self.anchor_mode == "shared":
+            return [self.anchors for _ in range(self.num_views)]
+        return list(self.view_anchors)
 
     def forward(self, views, mask=None):
         z_list = []
@@ -56,15 +73,16 @@ class SharedAnchorModel(nn.Module):
         z_hat_list = []
         q_list = []
 
-        anchors = F.normalize(self.anchors, dim=1)
         for view_idx, x in enumerate(views):
+            anchor_values = self.get_anchor_list()[view_idx]
+            anchors = F.normalize(anchor_values, dim=1)
             z = self.encoders[view_idx](x)
             x_hat = self.decoders[view_idx](z)
 
             z_norm = F.normalize(z, dim=1)
             logits = torch.matmul(z_norm, anchors.t()) / self.temperature
             s = torch.softmax(logits, dim=1)
-            z_hat = torch.matmul(s, self.anchors)
+            z_hat = torch.matmul(s, anchor_values)
             q = torch.softmax(torch.matmul(s, self.cluster_matrix.t()), dim=1)
 
             z_list.append(z)
@@ -79,6 +97,8 @@ class SharedAnchorModel(nn.Module):
             "S": s_list,
             "z_hat": z_hat_list,
             "q": q_list,
-            "anchors": self.anchors,
+            "anchors": self.anchors if self.anchor_mode == "shared" else self.view_anchors,
+            "anchor_list": self.get_anchor_list(),
+            "anchor_mode": self.anchor_mode,
             "cluster_matrix": self.cluster_matrix,
         }

@@ -172,3 +172,36 @@ def graph_pair_loss(graphs):
         for right in range(left + 1, len(graphs)):
             losses.append((graphs[left] - graphs[right]).pow(2).mean())
     return torch.stack(losses).mean()
+
+
+def anchor_pair_sinkhorn(b0, b1, num_iters=20, eps=1e-8):
+    """Build a balanced anchor-to-anchor transport matrix from B0/B1."""
+    b0 = F.normalize(b0, dim=1)
+    b1 = F.normalize(b1, dim=1)
+    similarity = b0.matmul(b1.t())
+    transport = torch.exp(similarity - similarity.max()).clamp_min(eps)
+    for _ in range(max(int(num_iters), 1)):
+        transport = transport / transport.sum(dim=1, keepdim=True).clamp_min(eps)
+        transport = transport / transport.sum(dim=0, keepdim=True).clamp_min(eps)
+    return transport
+
+
+def anchor_pair_diagnostics(transport):
+    row_sums = transport.sum(dim=1)
+    col_sums = transport.sum(dim=0)
+    row_entropy = -(transport.clamp_min(1e-8) * transport.clamp_min(1e-8).log()).sum(dim=1)
+    max_ratio = transport.max(dim=1).values.mean()
+    unique_target_ratio = transport.argmax(dim=1).unique().numel() / max(transport.shape[0], 1)
+    return {
+        "entropy": row_entropy.mean().item(),
+        "row_sum_min": row_sums.min().item(),
+        "row_sum_max": row_sums.max().item(),
+        "col_sum_min": col_sums.min().item(),
+        "col_sum_max": col_sums.max().item(),
+        "max_ratio": max_ratio.item(),
+        "unique_target_ratio": float(unique_target_ratio),
+    }
+
+
+def anchor_pair_loss(b0, b1, transport):
+    return (b0 - transport.matmul(b1)).pow(2).mean() + (b1 - transport.t().matmul(b0)).pow(2).mean()

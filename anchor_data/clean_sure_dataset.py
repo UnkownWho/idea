@@ -132,12 +132,16 @@ class CleanSUREDataset(Dataset):
             self.shuffle_idx,
         ) = _build_pvp_permutation(self.n_samples, self.aligned_prop, rng)
         self.view_sample_ids = self.permutation.T.copy()
+        self.paired_indices = self.aligned_indices.copy()
         self.mask_matrix = _build_psp_mask(self.n_samples, self.complete_prop, rng)
+        self.paired_mask_matrix = np.zeros(self.n_samples, dtype=bool)
+        self.paired_mask_matrix[self.paired_indices] = (
+            self.mask_matrix[self.paired_indices].all(axis=1)
+        )
         self.valid_indices_per_view = [
             np.where(self.mask_matrix[:, view_idx] > 0)[0].astype(np.int64)
             for view_idx in range(self.num_views)
         ]
-        self.paired_indices = self.aligned_indices.copy()
         self.is_pvp = self.aligned_prop < 1.0
         self.is_psp = self.complete_prop < 1.0
 
@@ -161,6 +165,7 @@ class CleanSUREDataset(Dataset):
             "label": torch.tensor(self.labels[index], dtype=torch.long),
             "global_id": torch.tensor(self.global_ids[index], dtype=torch.long),
             "view_sample_ids": torch.from_numpy(self.view_sample_ids[index].astype(np.int64)),
+            "paired_mask": torch.tensor(self.paired_mask_matrix[index], dtype=torch.bool),
         }
 
 

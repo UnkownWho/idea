@@ -16,6 +16,9 @@ from anchor_data.clean_sure_dataset import DATASET_NAMES, CleanSUREDataset, seed
 from anchor_models.shared_anchor import SharedAnchorModel
 from anchor_models.pbgraph import (
     align_pseudo_labels,
+    anchor_pair_diagnostics,
+    anchor_pair_loss,
+    anchor_pair_sinkhorn,
     apply_label_mapping,
     graph_from_assignments,
     graph_pair_loss,
@@ -102,6 +105,17 @@ def parse_args():
     )
     parser.add_argument("--q-align-topk", default=5, type=int)
     parser.add_argument("--q-align-metric", default="cosine", choices=("cosine", "kl", "l2"), type=str)
+    parser.add_argument("--anchor-mode", default="shared", choices=("shared", "view_specific"), type=str)
+    parser.add_argument(
+        "--eval-anchor-transfer",
+        nargs="?",
+        const=True,
+        default=False,
+        type=parse_bool,
+    )
+    parser.add_argument("--anchor-transfer-mode", default="pairing", choices=("pairing", "prototype"), type=str)
+    parser.add_argument("--lambda-anchor-pair", default=0.0, type=float)
+    parser.add_argument("--anchor-pair-sinkhorn-iters", default=20, type=int)
     parser.add_argument("--oracle-fusion", action="store_true", help="Report row-wise fusion in PVP/Both as oracle only.")
     return parser.parse_args()
 
@@ -118,8 +132,11 @@ def masked_mean(values, mask, eps=1e-8):
     return (values * mask).sum() / mask.sum().clamp_min(eps)
 
 
-def pair_valid_mask(mask):
-    return (mask[:, 0] > 0) & (mask[:, 1] > 0)
+def pair_valid_mask(mask, paired_mask=None):
+    valid = (mask[:, 0] > 0) & (mask[:, 1] > 0)
+    if paired_mask is not None:
+        valid = valid & paired_mask.bool()
+    return valid
 
 
 def symmetric_kl(q0, q1):
@@ -134,6 +151,7 @@ def compute_losses(batch, outputs, args, pbgraph_state=None):
     self_loss = torch.zeros((), device=mask.device)
     entropy_loss = torch.zeros((), device=mask.device)
     pair_q_loss = torch.zeros((), device=mask.device)
+    pair_q_valid_count = 0
     pseudo_q_loss = torch.zeros((), device=mask.device)
     q_values = []
 
@@ -151,7 +169,11 @@ def compute_losses(batch, outputs, args, pbgraph_state=None):
         q_values.append(q[visible > 0])
 
     if args.lambda_pair_q > 0 and mask.shape[1] >= 2:
-        valid = pair_valid_mask(mask)
+        paired_mask = batch.get("paired_mask")
+        if paired_mask is not None:
+            paired_mask = paired_mask.to(mask.device)
+        valid = pair_valid_mask(mask, paired_mask)
+        pair_q_valid_count = int(valid.sum().item())
         if valid.any():
             pair_q_loss = symmetric_kl(outputs["q"][0][valid], outputs["q"][1][valid]).mean()
 
@@ -195,6 +217,8 @@ def compute_losses(batch, outputs, args, pbgraph_state=None):
         "entropy": entropy_loss.item(),
         "balance": balance_loss.item(),
         "pair_q": pair_q_loss.item(),
+        "pair_q_raw": pair_q_loss.item(),
+        "pair_q_valid_count": pair_q_valid_count,
         "pseudo_q": pseudo_q_loss.item(),
         "graph_pair": 0.0,
         "total": total.item(),
@@ -203,7 +227,7 @@ def compute_losses(batch, outputs, args, pbgraph_state=None):
 
 def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
     model.train()
-    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "pseudo_q": 0.0, "graph_pair": 0.0, "total": 0.0}
+    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "pair_q_raw": 0.0, "pair_q_valid_count": 0.0, "pseudo_q": 0.0, "graph_pair": 0.0, "anchor_pair": 0.0, "total": 0.0}
     n_batches = 0
     for batch in loader:
         views = [x.to(device, non_blocking=True) for x in batch["views"]]
@@ -214,10 +238,22 @@ def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
         loss, loss_dict = compute_losses(batch, outputs, args, pbgraph_state)
 
         graph_pair = torch.zeros((), device=device)
+        anchor_pair = torch.zeros((), device=device)
         if args.cluster_head == "pbgraph" and pbgraph_state and pbgraph_state.get("B_list") is not None:
             graph_pair = graph_pair_loss(pbgraph_state["B_list"])
             loss = loss + args.lambda_graph_pair * graph_pair
+        if (
+            args.anchor_mode == "view_specific"
+            and pbgraph_state
+            and pbgraph_state.get("B_list") is not None
+            and pbgraph_state.get("anchor_pair_matrix") is not None
+        ):
+            b0, b1 = [graph.to(device) for graph in pbgraph_state["B_list"]]
+            transport = pbgraph_state["anchor_pair_matrix"].to(device)
+            anchor_pair = anchor_pair_loss(b0, b1, transport)
+            loss = loss + args.lambda_anchor_pair * anchor_pair
         loss_dict["graph_pair"] = graph_pair.item()
+        loss_dict["anchor_pair"] = anchor_pair.item()
         loss_dict["total"] = loss.item()
 
         optimizer.zero_grad()
@@ -397,6 +433,12 @@ def update_pbgraph(model, loader, dataset, device, args, state):
     state["pseudo_onehot"] = onehot
     state["pseudo_valid_mask"] = torch.from_numpy(pseudo_valid_mask)
     state["active"] = True
+    if args.anchor_mode == "view_specific":
+        state["anchor_pair_matrix"] = anchor_pair_sinkhorn(
+            state["B_list"][0],
+            state["B_list"][1],
+            args.anchor_pair_sinkhorn_iters,
+        )
     counts = np.bincount(pseudo_for_onehot, minlength=dataset.num_clusters)
     ratios = counts / max(len(pseudo_for_onehot), 1)
     print(
@@ -428,6 +470,18 @@ def update_pbgraph(model, loader, dataset, device, args, state):
             f"B_col_max={col_sums.max():.4f}, B_col_std={col_sums.std():.4f}"
         )
     print(f"PBGraph B_pair_mse={graph_pair_loss(state['B_list']).item():.8f}")
+    if state.get("anchor_pair_matrix") is not None:
+        pair_diag = anchor_pair_diagnostics(state["anchor_pair_matrix"])
+        state["anchor_pair_diagnostics"] = pair_diag
+        print(
+            f"PBGraph anchor_pair_entropy={pair_diag['entropy']:.6f}, "
+            f"anchor_pair_row_sum_min={pair_diag['row_sum_min']:.6f}, "
+            f"anchor_pair_row_sum_max={pair_diag['row_sum_max']:.6f}, "
+            f"anchor_pair_col_sum_min={pair_diag['col_sum_min']:.6f}, "
+            f"anchor_pair_col_sum_max={pair_diag['col_sum_max']:.6f}, "
+            f"anchor_pair_max_ratio={pair_diag['max_ratio']:.6f}, "
+            f"anchor_pair_unique_target_ratio={pair_diag['unique_target_ratio']:.6f}"
+        )
 
 
 def _kmeans_scores(features, labels):
@@ -640,6 +694,89 @@ def _format_q_align_diagnostics(diag):
     ]
 
 
+def _format_anchor_transfer_diagnostics(diag):
+    return [
+        f"eval_anchor_transfer={diag['enabled']}",
+        f"anchor_transfer_mode={diag['mode']}",
+        f"anchor_transfer_num_samples={diag['num_samples']}",
+    ]
+
+
+def _anchor_transfer_latent(assignments, source_b, target_b, target_anchors, transport, mode):
+    if mode == "pairing":
+        return assignments @ transport @ target_anchors
+    source_q = assignments @ source_b
+    target_proto = target_b.t() @ target_anchors
+    target_proto = target_proto / target_b.sum(dim=0, keepdim=True).t().clamp_min(1e-8)
+    return source_q @ target_proto
+
+
+def _anchor_transfer_evaluate(
+    dataset,
+    z_by_view,
+    s_by_view,
+    seen_by_view,
+    anchor_list,
+    B_list,
+    transport,
+    mode,
+):
+    # Evaluation is implemented with NumPy indexing, so detach all cached
+    # model/state tensors explicitly before moving them to the host.
+    anchors = [anchor.detach().cpu().numpy().astype(np.float32) for anchor in anchor_list]
+    b0 = B_list[0].detach().cpu().numpy().astype(np.float32)
+    b1 = B_list[1].detach().cpu().numpy().astype(np.float32)
+    pi = transport.detach().cpu().numpy().astype(np.float32)
+    z_parts = []
+    label_parts = []
+
+    if dataset.is_pvp:
+        # Evaluate both source directions using original source ids, never row ids.
+        for source_view, target_view in ((0, 1), (1, 0)):
+            source_ids = np.flatnonzero(seen_by_view[source_view])
+            if len(source_ids) == 0:
+                continue
+            source_s = torch.from_numpy(s_by_view[source_view][source_ids]).float()
+            source_b = torch.from_numpy(b0 if source_view == 0 else b1).float()
+            target_b = torch.from_numpy(b1 if source_view == 0 else b0).float()
+            target_anchor = torch.from_numpy(anchors[target_view]).float()
+            direction_pi = torch.from_numpy(pi if source_view == 0 else pi.T).float()
+            transferred = _anchor_transfer_latent(
+                source_s, source_b, target_b, target_anchor, direction_pi, mode
+            ).numpy()
+            source_z = z_by_view[source_view][source_ids]
+            z_parts.append(0.5 * (source_z + transferred))
+            label_parts.append(dataset.labels[source_ids])
+        if not z_parts:
+            return None, None
+        return np.concatenate(z_parts, axis=0), np.concatenate(label_parts, axis=0)
+
+    n_samples = len(dataset)
+    fused_z = np.zeros((n_samples, anchors[0].shape[1]), dtype=np.float32)
+    valid_rows = np.zeros(n_samples, dtype=bool)
+    for row in range(n_samples):
+        visible = np.flatnonzero(dataset.mask_matrix[row] > 0)
+        if len(visible) == 0:
+            continue
+        if len(visible) == 2:
+            fused_z[row] = 0.5 * (z_by_view[0][row] + z_by_view[1][row])
+        else:
+            source_view = int(visible[0])
+            target_view = 1 - source_view
+            source_s = torch.from_numpy(s_by_view[source_view][row:row + 1]).float()
+            source_b = torch.from_numpy(b0 if source_view == 0 else b1).float()
+            target_b = torch.from_numpy(b1 if source_view == 0 else b0).float()
+            target_anchor = torch.from_numpy(anchors[target_view]).float()
+            direction_pi = torch.from_numpy(pi if source_view == 0 else pi.T).float()
+            transferred = _anchor_transfer_latent(
+                source_s, source_b, target_b, target_anchor, direction_pi, mode
+            ).numpy()[0]
+            source_id = int(dataset.view_sample_ids[row, source_view])
+            fused_z[row] = 0.5 * (z_by_view[source_view][source_id] + transferred)
+        valid_rows[row] = True
+    return fused_z[valid_rows], dataset.labels[valid_rows]
+
+
 def evaluate(
     model,
     loader,
@@ -650,6 +787,9 @@ def evaluate(
     eval_q_align=False,
     q_align_topk=5,
     q_align_metric="cosine",
+    eval_anchor_transfer=False,
+    anchor_transfer_mode="pairing",
+    anchor_pair_matrix=None,
 ):
     model.eval()
     n_samples = len(dataset)
@@ -759,6 +899,33 @@ def evaluate(
                 )
     diagnostics["q_align"] = q_align_diag
 
+    anchor_transfer_diag = {
+        "enabled": False,
+        "mode": anchor_transfer_mode,
+        "num_samples": 0,
+    }
+    if eval_anchor_transfer and B_list is not None and anchor_pair_matrix is not None:
+        anchor_transfer_diag["enabled"] = True
+        transfer_z, transfer_labels = _anchor_transfer_evaluate(
+            dataset,
+            z_by_view,
+            s_by_view,
+            seen_by_view,
+            model.get_anchor_list(),
+            B_list,
+            anchor_pair_matrix,
+            anchor_transfer_mode,
+        )
+        if transfer_z is not None and len(transfer_z) > 0:
+            anchor_transfer_diag["num_samples"] = len(transfer_z)
+            if dataset.is_pvp:
+                results["anchor_transfer_fusion_z_kmeans"] = _kmeans_scores(transfer_z, transfer_labels)
+            if dataset.is_psp:
+                results["anchor_transfer_imputed_z_kmeans"] = _kmeans_scores(transfer_z, transfer_labels)
+            if not dataset.is_pvp and not dataset.is_psp:
+                results["anchor_transfer_fusion_z_kmeans"] = _kmeans_scores(transfer_z, transfer_labels)
+    diagnostics["anchor_transfer"] = anchor_transfer_diag
+
     return results, diagnostics
 
 
@@ -817,6 +984,7 @@ def main():
         hidden_dim=args.hidden_dim,
         num_anchors=args.num_anchors,
         temperature=args.temperature,
+        anchor_mode=args.anchor_mode,
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -830,6 +998,7 @@ def main():
         print(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / (1024 ** 3):.2f} GB")
     print(f"Dataset={dataset_name}, samples={len(dataset)}, view_dims={dataset.view_dims}, clusters={dataset.num_clusters}")
     print(f"PVP={dataset.is_pvp}, PSP={dataset.is_psp}")
+    print(f"Anchor mode={args.anchor_mode}, eval_anchor_transfer={args.eval_anchor_transfer}")
     if args.cluster_head == "pbgraph" and args.num_anchors < dataset.num_clusters:
         print("Warning: num_anchors < num_clusters; PBGraph may be under-capacity.")
     pbgraph_state = {
@@ -839,6 +1008,8 @@ def main():
         "pseudo_onehot": None,
         "pseudo_valid_mask": None,
         "B_list": None,
+        "anchor_pair_matrix": None,
+        "anchor_pair_diagnostics": None,
     }
     print("==========")
 
@@ -855,7 +1026,10 @@ def main():
             f"Epoch {epoch:03d}: total={loss_dict['total']:.4f}, rec={loss_dict['rec']:.4f}, "
             f"self={loss_dict['self']:.4f}, entropy={loss_dict['entropy']:.4f}, "
             f"balance={loss_dict['balance']:.4f}, pair_q={loss_dict['pair_q']:.4f}, "
+            f"pair_q_raw={loss_dict['pair_q_raw']:.8f}, "
+            f"pair_q_valid_count={loss_dict['pair_q_valid_count']:.1f}, "
             f"pseudo_q={loss_dict['pseudo_q']:.4f}, graph_pair={loss_dict['graph_pair']:.8f}, "
+            f"anchor_pair={loss_dict['anchor_pair']:.8f}, "
             f"pbgraph_active={pbgraph_state['active']}"
         )
 
@@ -867,12 +1041,18 @@ def main():
                 eval_q_align=args.eval_q_align,
                 q_align_topk=args.q_align_topk,
                 q_align_metric=args.q_align_metric,
+                eval_anchor_transfer=args.eval_anchor_transfer,
+                anchor_transfer_mode=args.anchor_transfer_mode,
+                anchor_pair_matrix=pbgraph_state["anchor_pair_matrix"] if pbgraph_state["active"] else None,
             )
             for name, scores in results.items():
                 print(_format_scores(name, scores))
             for name, diag in diagnostics.items():
                 if name == "q_align":
                     for line in _format_q_align_diagnostics(diag):
+                        print(line)
+                elif name == "anchor_transfer":
+                    for line in _format_anchor_transfer_diagnostics(diag):
                         print(line)
                 elif name.endswith("_q"):
                     for line in _format_q_diagnostics(name, diag):
