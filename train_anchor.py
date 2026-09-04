@@ -96,6 +96,7 @@ def parse_args():
     parser.add_argument("--lambda-graph-pair", default=0.0, type=float)
     parser.add_argument("--pbgraph-pseudo-source", default="fusion_z", choices=("fusion_z", "view_z"), type=str)
     parser.add_argument("--eval-interval", default=5, type=int)
+    parser.add_argument("--verbose-diagnostics", action="store_true", default=False)
     parser.add_argument(
         "--eval-q-align",
         nargs="?",
@@ -491,19 +492,22 @@ def update_pbgraph(model, loader, dataset, device, args, state):
     counts = np.bincount(pseudo_for_onehot, minlength=dataset.num_clusters)
     ratios = counts / max(len(pseudo_for_onehot), 1)
     print(
-        f"PBGraph update: pseudo_label_counts={counts.tolist()}, "
-        f"pseudo_label_ratios={_array_string(ratios)}, "
-        f"pseudo_label_max_ratio={ratios.max():.4f}, "
-        f"pseudo_label_used_clusters={int((counts > 0).sum())}"
-    )
-    print(
-        f"PBGraph label_alignment_applied={alignment_diag['applied']}, "
-        f"label_alignment_mapping={alignment_diag['mapping']}, "
+        f"PBGraph update: pseudo_label_max_ratio={ratios.max():.4f}, "
+        f"pseudo_label_used_clusters={int((counts > 0).sum())}, "
         f"label_agreement_before={alignment_diag['agreement_before']:.6f}, "
-        f"label_agreement_after={alignment_diag['agreement_after']:.6f}, "
-        f"contingency_trace_before={alignment_diag['trace_before']}, "
-        f"contingency_trace_after={alignment_diag['trace_after']}"
+        f"label_agreement_after={alignment_diag['agreement_after']:.6f}"
     )
+    if args.verbose_diagnostics:
+        print(
+            f"PBGraph pseudo_label_counts={counts.tolist()}, "
+            f"pseudo_label_ratios={_array_string(ratios)}"
+        )
+        print(
+            f"PBGraph label_alignment_applied={alignment_diag['applied']}, "
+            f"label_alignment_mapping={alignment_diag['mapping']}, "
+            f"contingency_trace_before={alignment_diag['trace_before']}, "
+            f"contingency_trace_after={alignment_diag['trace_after']}"
+        )
     print(
         f"PBGraph pbgraph_pair_aware_fusion={pair_aware}, "
         f"pseudo_label_num_aligned_samples={fusion_stats['num_aligned']}, "
@@ -513,22 +517,26 @@ def update_pbgraph(model, loader, dataset, device, args, state):
     for view_idx, graph in enumerate(state["B_list"]):
         col_sums = graph.sum(0).numpy()
         row_entropy = _entropy(graph.numpy()).mean()
-        print(
-            f"PBGraph view{view_idx}: B_row_entropy_mean={row_entropy:.4f}, "
-            f"B_col_sums={_array_string(col_sums)}, B_col_min={col_sums.min():.4f}, "
-            f"B_col_max={col_sums.max():.4f}, B_col_std={col_sums.std():.4f}"
-        )
+        if args.verbose_diagnostics:
+            print(
+                f"PBGraph view{view_idx}: B_row_entropy_mean={row_entropy:.4f}, "
+                f"B_col_sums={_array_string(col_sums)}, B_col_min={col_sums.min():.4f}, "
+                f"B_col_max={col_sums.max():.4f}, B_col_std={col_sums.std():.4f}"
+            )
     print(f"PBGraph B_pair_mse={graph_pair_loss(state['B_list']).item():.8f}")
     if state.get("anchor_pair_matrix") is not None:
         pair_diag = anchor_pair_diagnostics(state["anchor_pair_matrix"])
         state["anchor_pair_diagnostics"] = pair_diag
+        if args.verbose_diagnostics:
+            print(
+                f"PBGraph anchor_pair_entropy={pair_diag['entropy']:.6f}, "
+                f"anchor_pair_row_sum_min={pair_diag['row_sum_min']:.6f}, "
+                f"anchor_pair_row_sum_max={pair_diag['row_sum_max']:.6f}, "
+                f"anchor_pair_col_sum_min={pair_diag['col_sum_min']:.6f}, "
+                f"anchor_pair_col_sum_max={pair_diag['col_sum_max']:.6f}"
+            )
         print(
-            f"PBGraph anchor_pair_entropy={pair_diag['entropy']:.6f}, "
-            f"anchor_pair_row_sum_min={pair_diag['row_sum_min']:.6f}, "
-            f"anchor_pair_row_sum_max={pair_diag['row_sum_max']:.6f}, "
-            f"anchor_pair_col_sum_min={pair_diag['col_sum_min']:.6f}, "
-            f"anchor_pair_col_sum_max={pair_diag['col_sum_max']:.6f}, "
-            f"anchor_pair_max_ratio={pair_diag['max_ratio']:.6f}, "
+            f"PBGraph anchor_pair_max_ratio={pair_diag['max_ratio']:.6f}, "
             f"anchor_pair_unique_target_ratio={pair_diag['unique_target_ratio']:.6f}"
         )
 
@@ -1073,13 +1081,9 @@ def main():
         ):
             update_pbgraph(model, eval_loader, dataset, device, args, pbgraph_state)
         print(
-            f"Epoch {epoch:03d}: total={loss_dict['total']:.4f}, rec={loss_dict['rec']:.4f}, "
-            f"self={loss_dict['self']:.4f}, entropy={loss_dict['entropy']:.4f}, "
-            f"balance={loss_dict['balance']:.4f}, pair_q={loss_dict['pair_q']:.4f}, "
-            f"pair_q_raw={loss_dict['pair_q_raw']:.8f}, "
-            f"pair_q_valid_count={loss_dict['pair_q_valid_count']:.1f}, "
+            f"Epoch {epoch:03d}: total={loss_dict['total']:.4f}, "
+            f"rec={loss_dict['rec']:.4f}, self={loss_dict['self']:.4f}, "
             f"pseudo_q={loss_dict['pseudo_q']:.4f}, graph_pair={loss_dict['graph_pair']:.8f}, "
-            f"anchor_pair={loss_dict['anchor_pair']:.8f}, "
             f"transfer_loss={loss_dict['transfer']:.8f}, "
             f"transfer_pairs_count={loss_dict['transfer_pairs_count']:.1f}, "
             f"pbgraph_active={pbgraph_state['active']}"
@@ -1097,21 +1101,38 @@ def main():
                 anchor_transfer_mode=args.anchor_transfer_mode,
                 anchor_pair_matrix=pbgraph_state["anchor_pair_matrix"] if pbgraph_state["active"] else None,
             )
-            for name, scores in results.items():
-                print(_format_scores(name, scores))
-            for name, diag in diagnostics.items():
-                if name == "q_align":
-                    for line in _format_q_align_diagnostics(diag):
-                        print(line)
-                elif name == "anchor_transfer":
-                    for line in _format_anchor_transfer_diagnostics(diag):
-                        print(line)
-                elif name.endswith("_q"):
-                    for line in _format_q_diagnostics(name, diag):
-                        print(line)
-                elif name.endswith("_S"):
-                    for line in _format_s_diagnostics(name, diag):
-                        print(line)
+            compact_result_names = (
+                "view0_z_kmeans",
+                "view0_q_argmax",
+                "view1_z_kmeans",
+                "view1_q_argmax",
+                "fusion_z_kmeans",
+                "fusion_q_argmax",
+                "anchor_transfer_fusion_z_kmeans",
+                "anchor_transfer_imputed_z_kmeans",
+            )
+            if args.verbose_diagnostics:
+                for name, scores in results.items():
+                    print(_format_scores(name, scores))
+            else:
+                for name in compact_result_names:
+                    if name in results:
+                        print(_format_scores(name, results[name]))
+
+            if args.verbose_diagnostics:
+                for name, diag in diagnostics.items():
+                    if name == "q_align":
+                        for line in _format_q_align_diagnostics(diag):
+                            print(line)
+                    elif name == "anchor_transfer":
+                        for line in _format_anchor_transfer_diagnostics(diag):
+                            print(line)
+                    elif name.endswith("_q"):
+                        for line in _format_q_diagnostics(name, diag):
+                            print(line)
+                    elif name.endswith("_S"):
+                        for line in _format_s_diagnostics(name, diag):
+                            print(line)
             if dataset.is_pvp and not args.oracle_fusion:
                 print("PVP/Both: row-wise fusion is disabled. Use --oracle-fusion to report it as non-official.")
 
