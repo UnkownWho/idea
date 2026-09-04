@@ -17,7 +17,7 @@ from anchor_models.shared_anchor import SharedAnchorModel
 from anchor_models.pbgraph import (
     align_pseudo_labels,
     anchor_pair_diagnostics,
-    anchor_pair_loss,
+    anchor_pair_diagnostic,
     anchor_pair_sinkhorn,
     apply_label_mapping,
     graph_from_assignments,
@@ -86,6 +86,7 @@ def parse_args():
     parser.add_argument("--lambda-entropy", default=0.1, type=float)
     parser.add_argument("--lambda-balance", default=1.0, type=float)
     parser.add_argument("--lambda-pair-q", default=0.0, type=float)
+    parser.add_argument("--lambda-transfer", default=0.0, type=float)
     parser.add_argument("--cluster-head", default="param", choices=("param", "pbgraph"), type=str)
     parser.add_argument("--pbgraph-start-epoch", default=10, type=int)
     parser.add_argument("--pbgraph-update-interval", default=5, type=int)
@@ -143,6 +144,32 @@ def symmetric_kl(q0, q1):
     q0 = q0.clamp_min(1e-8)
     q1 = q1.clamp_min(1e-8)
     return 0.5 * ((q0 * (q0.log() - q1.log())).sum(1) + (q1 * (q1.log() - q0.log())).sum(1))
+
+
+def trainable_anchor_transfer_loss(model, outputs, batch, transport, device):
+    """Transfer paired visible latents through a fixed anchor correspondence."""
+    z0, z1 = outputs["z"][:2]
+    s0, s1 = outputs["S"][:2]
+    zero = z0.sum() * 0.0
+    if transport is None or "paired_mask" not in batch:
+        return zero, 0
+
+    mask = batch["mask"].to(device)
+    paired_mask = batch["paired_mask"].to(device).bool()
+    valid = (mask[:, 0] > 0) & (mask[:, 1] > 0) & paired_mask
+    valid_count = int(valid.sum().item())
+    if valid_count == 0:
+        return zero, 0
+
+    anchors = model.get_anchor_list()
+    pi_0_to_1 = transport.to(device)
+    z0_to_1 = s0[valid] @ pi_0_to_1 @ anchors[1]
+    z1_to_0 = s1[valid] @ pi_0_to_1.t() @ anchors[0]
+    transfer_loss = (
+        F.mse_loss(z0_to_1, z1[valid])
+        + F.mse_loss(z1_to_0, z0[valid])
+    )
+    return transfer_loss, valid_count
 
 
 def compute_losses(batch, outputs, args, pbgraph_state=None):
@@ -227,7 +254,7 @@ def compute_losses(batch, outputs, args, pbgraph_state=None):
 
 def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
     model.train()
-    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "pair_q_raw": 0.0, "pair_q_valid_count": 0.0, "pseudo_q": 0.0, "graph_pair": 0.0, "anchor_pair": 0.0, "total": 0.0}
+    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "pair_q_raw": 0.0, "pair_q_valid_count": 0.0, "pseudo_q": 0.0, "graph_pair": 0.0, "anchor_pair": 0.0, "transfer": 0.0, "transfer_pairs_count": 0.0, "total": 0.0}
     n_batches = 0
     for batch in loader:
         views = [x.to(device, non_blocking=True) for x in batch["views"]]
@@ -239,26 +266,48 @@ def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
 
         graph_pair = torch.zeros((), device=device)
         anchor_pair = torch.zeros((), device=device)
+        transfer_loss = torch.zeros((), device=device)
+        transfer_pairs_count = 0
         if args.cluster_head == "pbgraph" and pbgraph_state and pbgraph_state.get("B_list") is not None:
             graph_pair = graph_pair_loss(pbgraph_state["B_list"])
             loss = loss + args.lambda_graph_pair * graph_pair
-        if (
-            args.anchor_mode == "view_specific"
-            and pbgraph_state
-            and pbgraph_state.get("B_list") is not None
-            and pbgraph_state.get("anchor_pair_matrix") is not None
-        ):
+        if pbgraph_state and pbgraph_state.get("anchor_pair_matrix") is not None:
             b0, b1 = [graph.to(device) for graph in pbgraph_state["B_list"]]
             transport = pbgraph_state["anchor_pair_matrix"].to(device)
-            anchor_pair = anchor_pair_loss(b0, b1, transport)
-            loss = loss + args.lambda_anchor_pair * anchor_pair
+            anchor_pair = anchor_pair_diagnostic(b0, b1, transport)
+            if args.lambda_transfer > 0 and args.anchor_mode == "view_specific":
+                transfer_loss, transfer_pairs_count = trainable_anchor_transfer_loss(
+                    model, outputs, batch, transport, device
+                )
+                loss = loss + args.lambda_transfer * transfer_loss
         loss_dict["graph_pair"] = graph_pair.item()
         loss_dict["anchor_pair"] = anchor_pair.item()
+        loss_dict["transfer"] = transfer_loss.item()
+        loss_dict["transfer_pairs_count"] = transfer_pairs_count
         loss_dict["total"] = loss.item()
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        if (
+            pbgraph_state
+            and args.lambda_transfer > 0
+            and pbgraph_state.get("anchor_pair_matrix") is not None
+            and not pbgraph_state.get("transfer_debug_printed", False)
+        ):
+            anchor_has_grad = any(
+                parameter.grad is not None and parameter.grad.abs().sum().item() > 0
+                for parameter in model.get_anchor_list()
+            )
+            encoder_has_grad = any(
+                parameter.grad is not None and parameter.grad.abs().sum().item() > 0
+                for parameter in model.encoders.parameters()
+            )
+            print(
+                f"transfer_loss.requires_grad={transfer_loss.requires_grad}, "
+                f"anchors.grad={anchor_has_grad}, encoder.grad={encoder_has_grad}"
+            )
+            pbgraph_state["transfer_debug_printed"] = True
         for key in loss_sum:
             loss_sum[key] += loss_dict[key]
         n_batches += 1
@@ -1010,6 +1059,7 @@ def main():
         "B_list": None,
         "anchor_pair_matrix": None,
         "anchor_pair_diagnostics": None,
+        "transfer_debug_printed": False,
     }
     print("==========")
 
@@ -1030,6 +1080,8 @@ def main():
             f"pair_q_valid_count={loss_dict['pair_q_valid_count']:.1f}, "
             f"pseudo_q={loss_dict['pseudo_q']:.4f}, graph_pair={loss_dict['graph_pair']:.8f}, "
             f"anchor_pair={loss_dict['anchor_pair']:.8f}, "
+            f"transfer_loss={loss_dict['transfer']:.8f}, "
+            f"transfer_pairs_count={loss_dict['transfer_pairs_count']:.1f}, "
             f"pbgraph_active={pbgraph_state['active']}"
         )
 

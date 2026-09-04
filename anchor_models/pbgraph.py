@@ -203,5 +203,5 @@ def anchor_pair_diagnostics(transport):
     }
 
 
-def anchor_pair_loss(b0, b1, transport):
+def anchor_pair_diagnostic(b0, b1, transport):
     return (b0 - transport.matmul(b1)).pow(2).mean() + (b1 - transport.t().matmul(b0)).pow(2).mean()
