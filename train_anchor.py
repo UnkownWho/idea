@@ -86,6 +86,8 @@ def parse_args():
     parser.add_argument("--lambda-entropy", default=0.1, type=float)
     parser.add_argument("--lambda-balance", default=1.0, type=float)
     parser.add_argument("--lambda-pair-q", default=0.0, type=float)
+    parser.add_argument("--lambda-z-align", default=0.0, type=float)
+    parser.add_argument("--z-align-mode", default="cosine", choices=("cosine", "mse"), type=str)
     parser.add_argument("--lambda-transfer", default=0.0, type=float)
     parser.add_argument("--cluster-head", default="param", choices=("param", "pbgraph"), type=str)
     parser.add_argument("--pbgraph-start-epoch", default=10, type=int)
@@ -262,7 +264,7 @@ def compute_losses(batch, outputs, args, pbgraph_state=None):
 
 def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
     model.train()
-    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "pair_q_raw": 0.0, "pair_q_valid_count": 0.0, "pseudo_q": 0.0, "graph_pair": 0.0, "anchor_pair": 0.0, "transfer": 0.0, "transfer_pairs_count": 0.0, "total": 0.0}
+    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "pair_q_raw": 0.0, "pair_q_valid_count": 0.0, "z_align": 0.0, "z_align_pairs_count": 0.0, "pseudo_q": 0.0, "graph_pair": 0.0, "anchor_pair": 0.0, "transfer": 0.0, "transfer_pairs_count": 0.0, "total": 0.0}
     n_batches = 0
     for batch in loader:
         views = [x.to(device, non_blocking=True) for x in batch["views"]]
@@ -271,6 +273,24 @@ def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
         if args.cluster_head == "pbgraph" and pbgraph_state and pbgraph_state.get("B_list") is not None:
             outputs["q"] = [q_from_graph(outputs["S"][v], pbgraph_state["B_list"][v].to(device)) for v in range(2)]
         loss, loss_dict = compute_losses(batch, outputs, args, pbgraph_state)
+
+        z_align_loss = outputs["z"][0].sum() * 0.0
+        z_align_pairs_count = 0
+        lambda_z_align = getattr(args, "lambda_z_align", 0.0)
+        if lambda_z_align > 0.0 and len(outputs["z"]) >= 2:
+            paired_mask = batch.get("paired_mask")
+            if paired_mask is not None:
+                paired_mask = paired_mask.to(device).bool().reshape(-1)
+                pair_mask = (mask[:, 0] > 0) & (mask[:, 1] > 0) & paired_mask
+                z_align_pairs_count = int(pair_mask.sum().item())
+                if z_align_pairs_count > 0:
+                    z0_valid = F.normalize(outputs["z"][0][pair_mask], dim=1)
+                    z1_valid = F.normalize(outputs["z"][1][pair_mask], dim=1)
+                    if getattr(args, "z_align_mode", "cosine") == "cosine":
+                        z_align_loss = (1.0 - (z0_valid * z1_valid).sum(dim=1)).mean()
+                    else:
+                        z_align_loss = F.mse_loss(z0_valid, z1_valid)
+                    loss = loss + lambda_z_align * z_align_loss
 
         graph_pair = torch.zeros((), device=device)
         anchor_pair = torch.zeros((), device=device)
@@ -292,6 +312,8 @@ def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
         loss_dict["anchor_pair"] = anchor_pair.item()
         loss_dict["transfer"] = transfer_loss.item()
         loss_dict["transfer_pairs_count"] = transfer_pairs_count
+        loss_dict["z_align"] = z_align_loss.item()
+        loss_dict["z_align_pairs_count"] = z_align_pairs_count
         loss_dict["total"] = loss.item()
 
         optimizer.zero_grad()
@@ -1341,6 +1363,8 @@ def main():
             f"Epoch {epoch:03d}: total={loss_dict['total']:.4f}, "
             f"rec={loss_dict['rec']:.4f}, self={loss_dict['self']:.4f}, "
             f"pseudo_q={loss_dict['pseudo_q']:.4f}, graph_pair={loss_dict['graph_pair']:.8f}, "
+            f"z_align_loss={loss_dict['z_align']:.8f}, "
+            f"z_align_pairs_count={loss_dict['z_align_pairs_count']:.1f}, "
             f"transfer_loss={loss_dict['transfer']:.8f}, "
             f"transfer_pairs_count={loss_dict['transfer_pairs_count']:.1f}, "
             f"pbgraph_active={pbgraph_state['active']}"
