@@ -119,6 +119,13 @@ def parse_args():
     parser.add_argument("--lambda-anchor-pair", default=0.0, type=float)
     parser.add_argument("--anchor-pair-sinkhorn-iters", default=20, type=int)
     parser.add_argument("--oracle-fusion", action="store_true", help="Report row-wise fusion in PVP/Both as oracle only.")
+    parser.add_argument("--eval-quality-gated-fusion", action="store_true", default=False)
+    parser.add_argument(
+        "--fusion-confidence", default="combined",
+        choices=("q_conf", "entropy", "recon", "combined", "oracle_view0"),
+        type=str,
+    )
+    parser.add_argument("--fusion-gate-mode", default="soft", choices=("soft", "hard"), type=str)
     return parser.parse_args()
 
 
@@ -834,6 +841,181 @@ def _anchor_transfer_evaluate(
     return fused_z[valid_rows], dataset.labels[valid_rows]
 
 
+def _quality_score(q, recon_error, confidence, view_idx):
+    """Compute evaluation-only view quality without using labels."""
+    if confidence == "q_conf":
+        score = np.max(q, axis=1)
+    elif confidence == "entropy":
+        score = 1.0 - _entropy(q) / max(np.log(q.shape[1]), 1e-8)
+    elif confidence == "recon":
+        score = np.exp(-np.clip(recon_error, 0.0, 50.0))
+    elif confidence == "combined":
+        score = np.max(q, axis=1) * np.exp(-np.clip(recon_error, 0.0, 50.0))
+    elif confidence == "oracle_view0":
+        score = np.ones(len(q), dtype=np.float32) if view_idx == 0 else np.full(len(q), 1e-8, dtype=np.float32)
+    else:
+        raise ValueError(f"Unsupported fusion confidence: {confidence}")
+    return np.maximum(np.asarray(score, dtype=np.float32), 1e-8)
+
+
+def _transfer_candidates(
+    dataset, s_by_view, anchor_list, B_list, transport, mode
+):
+    """Generate source-indexed target latents for evaluation-only transfer."""
+    if B_list is None or transport is None or anchor_list is None:
+        return None
+    anchors = [anchor.detach().cpu().numpy().astype(np.float32) for anchor in anchor_list]
+    b_arrays = [b.detach().cpu().numpy().astype(np.float32) for b in B_list]
+    pi = transport.detach().cpu().numpy().astype(np.float32)
+    transferred = []
+    for source_view, target_view in ((0, 1), (1, 0)):
+        source_s = torch.from_numpy(s_by_view[source_view]).float()
+        source_b = torch.from_numpy(b_arrays[source_view]).float()
+        target_b = torch.from_numpy(b_arrays[target_view]).float()
+        target_anchor = torch.from_numpy(anchors[target_view]).float()
+        direction_pi = torch.from_numpy(pi if source_view == 0 else pi.T).float()
+        transferred.append(_anchor_transfer_latent(
+            source_s, source_b, target_b, target_anchor, direction_pi, mode
+        ).numpy().astype(np.float32))
+    return transferred
+
+
+def _quality_gated_evaluate(
+    dataset,
+    z_by_view,
+    q_by_view,
+    recon_by_view,
+    seen_by_view,
+    confidence,
+    transfer_candidates=None,
+    gate_mode="soft",
+):
+    """Quality-gated evaluation using explicit available candidates per row."""
+    n_samples = len(dataset)
+    mask = np.asarray(dataset.mask_matrix) > 0
+    paired = np.asarray(getattr(dataset, "paired_mask_matrix", np.zeros(n_samples, dtype=bool)), dtype=bool)
+    scores = [
+        _quality_score(q_by_view[v], recon_by_view[v], confidence, v)
+        for v in range(2)
+    ]
+    candidate_names = ("view0", "view1", "transfer0to1", "transfer1to0")
+    available_counts = dict.fromkeys(candidate_names, 0)
+    weight_sums = dict.fromkeys(candidate_names, 0.0)
+    score_sums = dict.fromkeys(candidate_names, 0.0)
+    hard_counts = dict.fromkeys(candidate_names, 0)
+    fusion_outputs = {"soft": [], "hard": []}
+    fusion_labels = {"soft": [], "hard": []}
+    imputed_outputs = {"soft": [], "hard": []}
+    imputed_labels = {"soft": [], "hard": []}
+    oracle_outputs, oracle_labels = [], []
+    skipped_count = 0
+    oracle_direct, oracle_transfer, oracle_fallback = 0, 0, 0
+
+    for row in range(n_samples):
+        visible = np.flatnonzero(mask[row])
+        if len(visible) == 0:
+            skipped_count += 1
+            continue
+        source_ids = [int(dataset.view_sample_ids[row, v]) for v in visible]
+        rowwise_pair = len(visible) == 2 and (not dataset.is_pvp or paired[row])
+        candidates = []
+        for v, source_id in zip(visible, source_ids):
+            candidates.append({
+                "name": f"view{v}", "z": z_by_view[v][source_id],
+                "score": float(scores[v][source_id]), "view": int(v),
+                "label": dataset.labels[source_id],
+            })
+
+        # In PVP, unrelated row-wise views are never put in the same list.
+        if not rowwise_pair and len(candidates) > 1:
+            candidates = [max(candidates, key=lambda item: item["score"])]
+
+        missing = len(visible) < 2
+        if missing and transfer_candidates is not None:
+            source_view = int(visible[0])
+            source_id = int(dataset.view_sample_ids[row, source_view])
+            target_view = 1 - source_view
+            candidates.append({
+                "name": f"transfer{source_view}to{target_view}",
+                "z": transfer_candidates[source_view][source_id],
+                "score": float(scores[source_view][source_id]),
+                "view": None, "label": dataset.labels[source_id],
+            })
+
+        if not candidates:
+            skipped_count += 1
+            continue
+        for candidate in candidates:
+            available_counts[candidate["name"]] += 1
+            score_sums[candidate["name"]] += candidate["score"]
+        raw_weights = np.asarray([candidate["score"] for candidate in candidates], dtype=np.float32)
+        soft_weights = raw_weights / max(float(raw_weights.sum()), 1e-8)
+        hard_index = int(np.argmax(raw_weights))
+        for candidate, weight in zip(candidates, soft_weights):
+            weight_sums[candidate["name"]] += float(weight)
+        hard_counts[candidates[hard_index]["name"]] += 1
+
+        def fuse(weights):
+            return np.sum(np.stack([item["z"] for item in candidates], axis=0) * weights[:, None], axis=0)
+
+        selected = candidates[hard_index]
+        for mode, weights in (("soft", soft_weights), ("hard", np.eye(len(candidates), dtype=np.float32)[hard_index])):
+            fusion_outputs[mode].append(fuse(weights))
+            fusion_labels[mode].append(selected["label"] if len(candidates) > 1 else candidates[0]["label"])
+            if missing and transfer_candidates is not None:
+                imputed_outputs[mode].append(fuse(weights))
+                imputed_labels[mode].append(fusion_labels[mode][-1])
+
+        if 0 in visible:
+            oracle_outputs.append(z_by_view[0][int(dataset.view_sample_ids[row, 0])])
+            oracle_labels.append(dataset.labels[int(dataset.view_sample_ids[row, 0])])
+            oracle_direct += 1
+        elif transfer_candidates is not None:
+            source_view = int(visible[0])
+            source_id = int(dataset.view_sample_ids[row, source_view])
+            oracle_outputs.append(transfer_candidates[source_view][source_id] if source_view == 1 else z_by_view[source_view][source_id])
+            oracle_labels.append(dataset.labels[source_id])
+            if source_view == 1:
+                oracle_transfer += 1
+            else:
+                oracle_fallback += 1
+        else:
+            source_view = int(visible[0])
+            source_id = int(dataset.view_sample_ids[row, source_view])
+            oracle_outputs.append(z_by_view[source_view][source_id])
+            oracle_labels.append(dataset.labels[source_id])
+            oracle_fallback += 1
+
+    diagnostics = {
+        "enabled": True,
+        "num_samples": len(fusion_outputs["soft"]),
+        "avg_score_view0": float(score_sums["view0"] / max(available_counts["view0"], 1)),
+        "avg_score_view1": float(score_sums["view1"] / max(available_counts["view1"], 1)),
+        "avg_score_transfer": float((score_sums["transfer0to1"] + score_sums["transfer1to0"]) /
+                                     max(available_counts["transfer0to1"] + available_counts["transfer1to0"], 1)),
+        "confidence": confidence,
+        "oracle_debug": confidence == "oracle_view0",
+        "available_counts": available_counts,
+        "weight_means": {name: weight_sums[name] / max(len(fusion_outputs["soft"]), 1)
+                          for name in candidate_names},
+        "hard_counts": hard_counts,
+        "skipped_count": skipped_count,
+        "oracle_view0_num_direct_view0": oracle_direct,
+        "oracle_view0_num_transfer_to_view0": oracle_transfer,
+        "oracle_view0_num_fallback_view1": oracle_fallback,
+    }
+    outputs = {
+        mode: (np.asarray(fusion_outputs[mode], dtype=np.float32), np.asarray(fusion_labels[mode], dtype=np.int64))
+        for mode in ("soft", "hard")
+    }
+    imputed = {
+        mode: (np.asarray(imputed_outputs[mode], dtype=np.float32), np.asarray(imputed_labels[mode], dtype=np.int64))
+        for mode in ("soft", "hard")
+    }
+    oracle = (np.asarray(oracle_outputs, dtype=np.float32), np.asarray(oracle_labels, dtype=np.int64))
+    return outputs, imputed, oracle, diagnostics
+
+
 def evaluate(
     model,
     loader,
@@ -847,6 +1029,9 @@ def evaluate(
     eval_anchor_transfer=False,
     anchor_transfer_mode="pairing",
     anchor_pair_matrix=None,
+    eval_quality_gated_fusion=False,
+    fusion_confidence="combined",
+    fusion_gate_mode="soft",
 ):
     model.eval()
     n_samples = len(dataset)
@@ -857,6 +1042,7 @@ def evaluate(
     z_by_view = [np.zeros((n_samples, latent_dim), dtype=np.float32) for _ in range(2)]
     q_by_view = [np.zeros((n_samples, num_clusters), dtype=np.float32) for _ in range(2)]
     s_by_view = [np.zeros((n_samples, num_anchors), dtype=np.float32) for _ in range(2)]
+    recon_by_view = [np.zeros(n_samples, dtype=np.float32) for _ in range(2)]
     seen_by_view = [np.zeros(n_samples, dtype=bool) for _ in range(2)]
     z_fused_sum = np.zeros((n_samples, latent_dim), dtype=np.float32)
     q_fused_sum = np.zeros((n_samples, num_clusters), dtype=np.float32)
@@ -878,6 +1064,8 @@ def evaluate(
                 z_np = outputs["z"][view_idx].cpu().numpy()
                 q_np = outputs["q"][view_idx].cpu().numpy()
                 s_np = outputs["S"][view_idx].cpu().numpy()
+                x_np = batch["views"][view_idx].cpu().numpy()
+                x_hat_np = outputs["x_hat"][view_idx].cpu().numpy()
                 visible_rows = np.where(mask_np[:, view_idx] > 0)[0]
                 if len(visible_rows) == 0:
                     continue
@@ -886,6 +1074,9 @@ def evaluate(
                 z_by_view[view_idx][source_ids] = z_np[visible_rows]
                 q_by_view[view_idx][source_ids] = q_np[visible_rows]
                 s_by_view[view_idx][source_ids] = s_np[visible_rows]
+                recon_by_view[view_idx][source_ids] = np.mean(
+                    (x_hat_np[visible_rows] - x_np[visible_rows]) ** 2, axis=1
+                )
                 seen_by_view[view_idx][source_ids] = True
 
                 z_fused_sum[global_ids[visible_rows]] += z_np[visible_rows]
@@ -982,6 +1173,72 @@ def evaluate(
             if not dataset.is_pvp and not dataset.is_psp:
                 results["anchor_transfer_fusion_z_kmeans"] = _kmeans_scores(transfer_z, transfer_labels)
     diagnostics["anchor_transfer"] = anchor_transfer_diag
+
+    quality_diag = {
+        "enabled": False,
+        "confidence": "combined",
+        "num_samples": 0,
+        "avg_score_view0": 0.0,
+        "avg_score_view1": 0.0,
+        "avg_score_transfer": 0.0,
+        "oracle_debug": False,
+    }
+    if eval_quality_gated_fusion:
+        transfer_candidates = None
+        if eval_anchor_transfer and B_list is not None and anchor_pair_matrix is not None:
+            transfer_candidates = _transfer_candidates(
+                dataset,
+                s_by_view,
+                model.get_anchor_list(),
+                B_list,
+                anchor_pair_matrix,
+                anchor_transfer_mode,
+            )
+        gated_outputs, gated_imputed, oracle_view0_pair, quality_diag = _quality_gated_evaluate(
+            dataset,
+            z_by_view,
+            q_by_view,
+            recon_by_view,
+            seen_by_view,
+            fusion_confidence,
+            transfer_candidates,
+            fusion_gate_mode,
+        )
+        for mode in ("soft", "hard"):
+            fusion_quality_z, fusion_quality_labels = gated_outputs[mode]
+            if len(fusion_quality_z) >= num_clusters:
+                results[f"quality_gated_{mode}_z_kmeans"] = _kmeans_scores(
+                    fusion_quality_z, fusion_quality_labels
+                )
+                if mode == fusion_gate_mode:
+                    results["quality_gated_fusion_z_kmeans"] = results[f"quality_gated_{mode}_z_kmeans"]
+            imputed_quality_z, imputed_quality_labels = gated_imputed[mode]
+            if len(imputed_quality_z) >= num_clusters:
+                results[f"quality_gated_imputed_{mode}_z_kmeans"] = _kmeans_scores(
+                    imputed_quality_z, imputed_quality_labels
+                )
+                if mode == fusion_gate_mode:
+                    results["quality_gated_imputed_z_kmeans"] = results[f"quality_gated_imputed_{mode}_z_kmeans"]
+        oracle_z, oracle_labels = oracle_view0_pair
+        if fusion_confidence == "oracle_view0" and len(oracle_z) >= num_clusters:
+            results["quality_gated_oracle_view0_z_kmeans"] = _kmeans_scores(oracle_z, oracle_labels)
+        fallback_features = []
+        fallback_labels = []
+        for row in range(n_samples):
+            if dataset.mask_matrix[row, 0] > 0:
+                source_id = int(dataset.view_sample_ids[row, 0])
+                fallback_features.append(z_by_view[0][source_id])
+                fallback_labels.append(dataset.labels[source_id])
+            elif dataset.mask_matrix[row, 1] > 0:
+                source_id = int(dataset.view_sample_ids[row, 1])
+                fallback_features.append(z_by_view[1][source_id])
+                fallback_labels.append(dataset.labels[source_id])
+        if len(fallback_features) >= num_clusters:
+            results["view0_or_fallback_z_kmeans"] = _kmeans_scores(
+                np.asarray(fallback_features, dtype=np.float32),
+                np.asarray(fallback_labels, dtype=np.int64),
+            )
+    diagnostics["quality_gated_fusion"] = quality_diag
 
     return results, diagnostics
 
@@ -1100,6 +1357,9 @@ def main():
                 eval_anchor_transfer=args.eval_anchor_transfer,
                 anchor_transfer_mode=args.anchor_transfer_mode,
                 anchor_pair_matrix=pbgraph_state["anchor_pair_matrix"] if pbgraph_state["active"] else None,
+                eval_quality_gated_fusion=args.eval_quality_gated_fusion,
+                fusion_confidence=args.fusion_confidence,
+                fusion_gate_mode=args.fusion_gate_mode,
             )
             compact_result_names = (
                 "view0_z_kmeans",
@@ -1110,6 +1370,14 @@ def main():
                 "fusion_q_argmax",
                 "anchor_transfer_fusion_z_kmeans",
                 "anchor_transfer_imputed_z_kmeans",
+                "quality_gated_fusion_z_kmeans",
+                "quality_gated_imputed_z_kmeans",
+                "quality_gated_soft_z_kmeans",
+                "quality_gated_hard_z_kmeans",
+                "quality_gated_imputed_soft_z_kmeans",
+                "quality_gated_imputed_hard_z_kmeans",
+                "quality_gated_oracle_view0_z_kmeans",
+                "view0_or_fallback_z_kmeans",
             )
             if args.verbose_diagnostics:
                 for name, scores in results.items():
@@ -1118,6 +1386,25 @@ def main():
                 for name in compact_result_names:
                     if name in results:
                         print(_format_scores(name, results[name]))
+            quality_diag = diagnostics.get("quality_gated_fusion", {})
+            if quality_diag.get("enabled", False):
+                suffix = " non-official/debug" if quality_diag.get("oracle_debug", False) else ""
+                print(
+                    f"quality_gated_fusion: confidence={quality_diag['confidence']}, "
+                    f"quality_gated_num_samples={quality_diag['num_samples']}, "
+                    f"avg_score_view0={quality_diag['avg_score_view0']:.6f}, "
+                    f"avg_score_view1={quality_diag['avg_score_view1']:.6f}, "
+                    f"avg_score_transfer={quality_diag['avg_score_transfer']:.6f}{suffix}"
+                )
+                print(f"gate_available_counts={quality_diag['available_counts']}")
+                print(f"gate_weight_means={quality_diag['weight_means']}")
+                print(f"gate_hard_select_counts={quality_diag['hard_counts']}")
+                print(f"gate_skipped_count={quality_diag['skipped_count']}")
+                print(
+                    f"oracle_view0_num_direct_view0={quality_diag['oracle_view0_num_direct_view0']}, "
+                    f"oracle_view0_num_transfer_to_view0={quality_diag['oracle_view0_num_transfer_to_view0']}, "
+                    f"oracle_view0_num_fallback_view1={quality_diag['oracle_view0_num_fallback_view1']}"
+                )
 
             if args.verbose_diagnostics:
                 for name, diag in diagnostics.items():
