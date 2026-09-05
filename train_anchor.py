@@ -128,6 +128,7 @@ def parse_args():
         type=str,
     )
     parser.add_argument("--fusion-gate-mode", default="soft", choices=("soft", "hard"), type=str)
+    parser.add_argument("--eval-common-space-diagnostics", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -593,6 +594,11 @@ def _entropy(probs, axis=1):
     return -(probs * np.log(probs)).sum(axis=axis)
 
 
+def _normalize_rows(values):
+    values = np.asarray(values, dtype=np.float32)
+    return values / np.maximum(np.linalg.norm(values, axis=1, keepdims=True), 1e-8)
+
+
 def _q_diagnostics(q):
     num_clusters = q.shape[1]
     q_mean = q.mean(axis=0)
@@ -1054,6 +1060,7 @@ def evaluate(
     eval_quality_gated_fusion=False,
     fusion_confidence="combined",
     fusion_gate_mode="soft",
+    eval_common_space_diagnostics=False,
 ):
     model.eval()
     n_samples = len(dataset)
@@ -1174,6 +1181,7 @@ def evaluate(
         "mode": anchor_transfer_mode,
         "num_samples": 0,
     }
+    transfer_z, transfer_labels = None, None
     if eval_anchor_transfer and B_list is not None and anchor_pair_matrix is not None:
         anchor_transfer_diag["enabled"] = True
         transfer_z, transfer_labels = _anchor_transfer_evaluate(
@@ -1195,6 +1203,114 @@ def evaluate(
             if not dataset.is_pvp and not dataset.is_psp:
                 results["anchor_transfer_fusion_z_kmeans"] = _kmeans_scores(transfer_z, transfer_labels)
     diagnostics["anchor_transfer"] = anchor_transfer_diag
+
+    if eval_common_space_diagnostics:
+        # These are evaluation-only representations.  All rows are assembled
+        # from visible source rows; no labels are used to choose a view.
+        z_norm_by_view = [_normalize_rows(z_by_view[v]) for v in range(2)]
+        for view_idx in range(2):
+            seen = seen_by_view[view_idx]
+            if seen.sum() >= num_clusters:
+                results[f"view{view_idx}_z_norm_kmeans"] = _kmeans_scores(
+                    z_norm_by_view[view_idx][seen], labels[seen]
+                )
+                results[f"view{view_idx}_q_kmeans"] = _kmeans_scores(
+                    q_by_view[view_idx][seen], labels[seen]
+                )
+                results[f"view{view_idx}_S_kmeans"] = _kmeans_scores(
+                    s_by_view[view_idx][seen], labels[seen]
+                )
+
+        def available_mean(values_by_view, row, normalize=False):
+            vectors = []
+            for view_idx in range(2):
+                if dataset.mask_matrix[row, view_idx] > 0:
+                    source_id = int(dataset.view_sample_ids[row, view_idx])
+                    value = values_by_view[view_idx][source_id]
+                    vectors.append(_normalize_rows(value[None, :])[0] if normalize else value)
+            return np.mean(np.stack(vectors), axis=0) if vectors else None
+
+        def score_rows(values, row_ids, row_labels):
+            values = np.asarray(values, dtype=np.float32)
+            row_labels = np.asarray(row_labels, dtype=np.int64)
+            if len(values) >= num_clusters:
+                return _kmeans_scores(values, row_labels)
+            return None
+
+        # PVP cross-view diagnostics use only known paired rows.  In aligned
+        # PSP, all visible views share the row/global-ID coordinate system.
+        if dataset.is_pvp:
+            fusion_rows = np.asarray(dataset.paired_indices, dtype=np.int64)
+            fusion_rows = fusion_rows[
+                (dataset.mask_matrix[fusion_rows, 0] > 0)
+                & (dataset.mask_matrix[fusion_rows, 1] > 0)
+            ]
+            fusion_suffix = "_aligned_subset_diagnostic"
+        else:
+            fusion_rows = np.arange(n_samples, dtype=np.int64)
+            fusion_suffix = ""
+
+        fusion_row_set = set(fusion_rows.tolist())
+        z_norm_mean, q_mean, s_mean, fusion_labels = [], [], [], []
+        q_fallback, q_fallback_labels = [], []
+        visible_q, visible_q_labels = [], []
+        fallback_z, fallback_z_labels = [], []
+        for row in range(n_samples):
+            z_value = available_mean(z_norm_by_view, row)
+            q_value = available_mean(q_by_view, row)
+            s_value = available_mean(s_by_view, row)
+            if q_value is not None:
+                visible_q.append(q_value)
+                visible_q_labels.append(labels[row])
+                fallback_view = 0 if dataset.mask_matrix[row, 0] > 0 else 1
+                fallback_source_id = int(dataset.view_sample_ids[row, fallback_view])
+                q_fallback.append(q_by_view[fallback_view][fallback_source_id])
+                q_fallback_labels.append(labels[row])
+            if not dataset.is_pvp and z_value is not None:
+                fallback_view = 0 if dataset.mask_matrix[row, 0] > 0 else 1
+                source_id = int(dataset.view_sample_ids[row, fallback_view])
+                fallback_z.append(z_norm_by_view[fallback_view][source_id])
+                fallback_z_labels.append(labels[row])
+            if row in fusion_row_set:
+                if z_value is not None and q_value is not None and s_value is not None:
+                    z_norm_mean.append(z_value)
+                    q_mean.append(q_value)
+                    s_mean.append(s_value)
+                    fusion_labels.append(labels[row])
+
+        z_scores = score_rows(z_norm_mean, fusion_rows, fusion_labels)
+        q_scores = score_rows(q_mean, fusion_rows, fusion_labels)
+        s_scores = score_rows(s_mean, fusion_rows, fusion_labels)
+        if z_scores is not None:
+            results[f"fusion_z_norm_kmeans{fusion_suffix}"] = z_scores
+        if q_scores is not None:
+            results[f"fusion_q_mean_kmeans{fusion_suffix}"] = q_scores
+        if s_scores is not None:
+            results[f"fusion_S_mean_kmeans_diagnostic{fusion_suffix}"] = s_scores
+
+        if not dataset.is_pvp:
+            fallback_scores = score_rows(fallback_z, np.arange(len(fallback_z)), fallback_z_labels)
+            q_fallback_scores = score_rows(q_fallback, np.arange(len(q_fallback)), q_fallback_labels)
+            q_available_scores = score_rows(visible_q, np.arange(len(visible_q)), visible_q_labels)
+            if fallback_scores is not None:
+                results["view0_or_fallback_z_norm_kmeans"] = fallback_scores
+            if q_fallback_scores is not None:
+                results["visible_q_or_fallback_kmeans"] = q_fallback_scores
+            if q_available_scores is not None:
+                results["fusion_q_available_mean_kmeans"] = q_available_scores
+
+        if transfer_z is not None and len(transfer_z) >= num_clusters:
+            transfer_norm = _normalize_rows(transfer_z)
+            results["anchor_transfer_imputed_z_norm_kmeans"] = _kmeans_scores(
+                transfer_norm, transfer_labels
+            )
+            results["anchor_transfer_fusion_z_norm_kmeans"] = _kmeans_scores(
+                transfer_norm, transfer_labels
+            )
+        diagnostics["common_space"] = {
+            "enabled": True,
+            "note": "PVP fusion metrics use paired/aligned subset only; S fusion is diagnostic.",
+        }
 
     quality_diag = {
         "enabled": False,
@@ -1384,6 +1500,7 @@ def main():
                 eval_quality_gated_fusion=args.eval_quality_gated_fusion,
                 fusion_confidence=args.fusion_confidence,
                 fusion_gate_mode=args.fusion_gate_mode,
+                eval_common_space_diagnostics=args.eval_common_space_diagnostics,
             )
             compact_result_names = (
                 "view0_z_kmeans",
@@ -1402,6 +1519,23 @@ def main():
                 "quality_gated_imputed_hard_z_kmeans",
                 "quality_gated_oracle_view0_z_kmeans",
                 "view0_or_fallback_z_kmeans",
+                "view0_z_norm_kmeans",
+                "view1_z_norm_kmeans",
+                "fusion_z_norm_kmeans",
+                "view0_or_fallback_z_norm_kmeans",
+                "anchor_transfer_imputed_z_norm_kmeans",
+                "anchor_transfer_fusion_z_norm_kmeans",
+                "view0_q_kmeans",
+                "view1_q_kmeans",
+                "fusion_q_mean_kmeans",
+                "visible_q_or_fallback_kmeans",
+                "fusion_q_available_mean_kmeans",
+                "view0_S_kmeans",
+                "view1_S_kmeans",
+                "fusion_S_mean_kmeans_diagnostic",
+                "fusion_z_norm_kmeans_aligned_subset_diagnostic",
+                "fusion_q_mean_kmeans_aligned_subset_diagnostic",
+                "fusion_S_mean_kmeans_diagnostic_aligned_subset_diagnostic",
             )
             if args.verbose_diagnostics:
                 for name, scores in results.items():
