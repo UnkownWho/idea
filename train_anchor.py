@@ -89,6 +89,7 @@ def parse_args():
     parser.add_argument("--lambda-z-align", default=0.0, type=float)
     parser.add_argument("--z-align-mode", default="cosine", choices=("cosine", "mse"), type=str)
     parser.add_argument("--lambda-transfer", default=0.0, type=float)
+    parser.add_argument("--lambda-transfer-norm", default=0.0, type=float)
     parser.add_argument("--cluster-head", default="param", choices=("param", "pbgraph"), type=str)
     parser.add_argument("--pbgraph-start-epoch", default=10, type=int)
     parser.add_argument("--pbgraph-update-interval", default=5, type=int)
@@ -128,7 +129,12 @@ def parse_args():
         type=str,
     )
     parser.add_argument("--fusion-gate-mode", default="soft", choices=("soft", "hard"), type=str)
-    parser.add_argument("--eval-common-space-diagnostics", action="store_true", default=False)
+    parser.add_argument(
+        "--eval-common-space-diagnostics",
+        action="store_true",
+        default=True,
+        help="Keep common-space evaluation outputs enabled (formal normalized-z/q/S diagnostics).",
+    )
     return parser.parse_args()
 
 
@@ -181,6 +187,36 @@ def trainable_anchor_transfer_loss(model, outputs, batch, transport, device):
         + F.mse_loss(z1_to_0, z0[valid])
     )
     return transfer_loss, valid_count
+
+
+def trainable_anchor_transfer_norm_loss(model, outputs, batch, transport, device):
+    """Normalized transfer loss on paired visible samples only."""
+    z0, z1 = outputs["z"][:2]
+    s0, s1 = outputs["S"][:2]
+    zero = z0.sum() * 0.0
+    if transport is None or "paired_mask" not in batch:
+        return zero, 0
+
+    mask = batch["mask"].to(device)
+    paired_mask = batch["paired_mask"].to(device).bool().reshape(-1)
+    valid = (mask[:, 0] > 0) & (mask[:, 1] > 0) & paired_mask
+    valid_count = int(valid.sum().item())
+    if valid_count == 0:
+        return zero, 0
+
+    anchors = model.get_anchor_list()
+    pi_0_to_1 = transport.to(device)
+    z1_hat = s0[valid] @ pi_0_to_1 @ anchors[1]
+    z0_hat = s1[valid] @ pi_0_to_1.t() @ anchors[0]
+    z1_hat = F.normalize(z1_hat, dim=1)
+    z0_hat = F.normalize(z0_hat, dim=1)
+    z1_target = F.normalize(z1[valid], dim=1)
+    z0_target = F.normalize(z0[valid], dim=1)
+    loss = (
+        (1.0 - (z1_hat * z1_target).sum(dim=1)).mean()
+        + (1.0 - (z0_hat * z0_target).sum(dim=1)).mean()
+    )
+    return loss, valid_count
 
 
 def compute_losses(batch, outputs, args, pbgraph_state=None):
@@ -265,7 +301,7 @@ def compute_losses(batch, outputs, args, pbgraph_state=None):
 
 def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
     model.train()
-    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "pair_q_raw": 0.0, "pair_q_valid_count": 0.0, "z_align": 0.0, "z_align_pairs_count": 0.0, "pseudo_q": 0.0, "graph_pair": 0.0, "anchor_pair": 0.0, "transfer": 0.0, "transfer_pairs_count": 0.0, "total": 0.0}
+    loss_sum = {"rec": 0.0, "self": 0.0, "entropy": 0.0, "balance": 0.0, "pair_q": 0.0, "pair_q_raw": 0.0, "pair_q_valid_count": 0.0, "z_align": 0.0, "z_align_pairs_count": 0.0, "pseudo_q": 0.0, "graph_pair": 0.0, "anchor_pair": 0.0, "transfer": 0.0, "transfer_pairs_count": 0.0, "transfer_norm": 0.0, "transfer_norm_pairs_count": 0.0, "total": 0.0}
     n_batches = 0
     for batch in loader:
         views = [x.to(device, non_blocking=True) for x in batch["views"]]
@@ -297,6 +333,8 @@ def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
         anchor_pair = torch.zeros((), device=device)
         transfer_loss = torch.zeros((), device=device)
         transfer_pairs_count = 0
+        transfer_norm_loss = torch.zeros((), device=device)
+        transfer_norm_pairs_count = 0
         if args.cluster_head == "pbgraph" and pbgraph_state and pbgraph_state.get("B_list") is not None:
             graph_pair = graph_pair_loss(pbgraph_state["B_list"])
             loss = loss + args.lambda_graph_pair * graph_pair
@@ -309,10 +347,17 @@ def train_one_epoch(model, loader, optimizer, device, args, pbgraph_state=None):
                     model, outputs, batch, transport, device
                 )
                 loss = loss + args.lambda_transfer * transfer_loss
+            if getattr(args, "lambda_transfer_norm", 0.0) > 0:
+                transfer_norm_loss, transfer_norm_pairs_count = trainable_anchor_transfer_norm_loss(
+                    model, outputs, batch, transport, device
+                )
+                loss = loss + args.lambda_transfer_norm * transfer_norm_loss
         loss_dict["graph_pair"] = graph_pair.item()
         loss_dict["anchor_pair"] = anchor_pair.item()
         loss_dict["transfer"] = transfer_loss.item()
         loss_dict["transfer_pairs_count"] = transfer_pairs_count
+        loss_dict["transfer_norm"] = transfer_norm_loss.item()
+        loss_dict["transfer_norm_pairs_count"] = transfer_norm_pairs_count
         loss_dict["z_align"] = z_align_loss.item()
         loss_dict["z_align_pairs_count"] = z_align_pairs_count
         loss_dict["total"] = loss.item()
@@ -1483,6 +1528,8 @@ def main():
             f"z_align_pairs_count={loss_dict['z_align_pairs_count']:.1f}, "
             f"transfer_loss={loss_dict['transfer']:.8f}, "
             f"transfer_pairs_count={loss_dict['transfer_pairs_count']:.1f}, "
+            f"transfer_norm_loss={loss_dict['transfer_norm']:.8f}, "
+            f"transfer_norm_pairs_count={loss_dict['transfer_norm_pairs_count']:.1f}, "
             f"pbgraph_active={pbgraph_state['active']}"
         )
 
